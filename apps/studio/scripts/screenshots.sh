@@ -2,8 +2,9 @@
 # Renders every scene, then a live run against the mock server, into screenshots/.
 # Run from the app's folder after `cargo build --release`.
 set -eu
-app=target/release/mmh3-studio
-root=target/screenshot-dirs
+bin=${CARGO_TARGET_DIR:-../../target}/release
+app=$bin/mmh3-studio
+root=$bin/screenshot-dirs
 mkdir -p screenshots
 for scene in empty disconnected running gallery failed custom-size offline-selected confirm-delete; do
   for theme in light dark; do
@@ -18,7 +19,7 @@ done
 live() {
   name=$1
   shift
-  target/release/mock-server --listen 127.0.0.1:8899 >/dev/null &
+  "$bin/mock-server" --listen 127.0.0.1:8899 >/dev/null &
   mock=$!
   sleep 0.4
   RUNE_DIRS_ROOT="$root/$name-$$" $app --server http://127.0.0.1:8899 --realtime --script scripts/generate.json --scale 2 "$@" >/dev/null

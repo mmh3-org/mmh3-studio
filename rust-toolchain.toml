@@ -1,0 +1,8 @@
+[toolchain]
+# Rune's own pin; it uses language features newer than the last stable release.
+channel = "1.99.1"
+# rustup's default profile adds rust-docs, which every Nix store would download
+# and unpack for nothing.
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
