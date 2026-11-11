@@ -298,14 +298,14 @@ fn status_bar(s: &State, k: &Kit) -> El {
 
 /// Only the native build reads the power state, so on the web this is always empty.
 fn power_banner(s: &State, k: &Kit) -> Option<El> {
-    use crate::power::HIGH_POWER_COMMAND;
+    use crate::power::{HIGH_POWER_COMMAND, Issue};
 
     let issues = s.power_warning();
     if issues.is_empty() {
         return None;
     }
     let c = &k.c;
-    let causes = issues.iter().map(|i| i.describe()).collect::<Vec<_>>().join(" ");
+    let causes = issues.iter().map(Issue::describe).collect::<Vec<_>>().join(" ");
     let words = col()
         .key("power-words")
         .gap(2.0)
@@ -331,7 +331,7 @@ fn power_banner(s: &State, k: &Kit) -> Option<El> {
                 .key("power-settings"),
         );
     }
-    if issues.iter().any(|i| i.is_mode()) {
+    if issues.iter().any(Issue::is_mode) {
         actions = actions.child(
             Button::new("Copy command")
                 .variant(ButtonVariant::Outline)

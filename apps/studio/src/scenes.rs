@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status};
 use crate::mock::paint;
-use crate::power::{Mode, Power, Source};
+use crate::power::{Chip, Mode, Power, Source};
 
 use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
@@ -170,14 +170,14 @@ pub fn references(s: &mut State) {
     }
 }
 
-/// A laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which can't keep
-/// its battery up under a generation.
+/// A 14-inch laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which
+/// can't keep its battery up under a generation.
 pub fn power(s: &mut State) {
     running(s);
     s.power = Some(Power {
         mode: Some(Mode::Automatic),
         high_available: true,
-        large_chip: true,
+        chip: Chip::Large { capped_case: true },
         source: Some(Source::Adapter { watts: Some(90), draining: true }),
         ..Power::default()
     });

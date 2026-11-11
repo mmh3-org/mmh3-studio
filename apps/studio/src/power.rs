@@ -2,7 +2,7 @@
 //! a small adapter or held back for heat keeps the GPU at a low clock, and a generation takes
 //! two or three times as long.
 //!
-//! Everything is read from `pmset` and `NSProcessInfo`, neither of which needs root.
+//! Everything is read from `pmset`, `sysctl` and `NSProcessInfo`, none of which needs root.
 
 /// The Energy Mode macOS runs in: `pmset`'s `powermode` 0, 1 and 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +20,17 @@ pub enum Thermal {
     Fair,
     Serious,
     Critical,
+}
+
+/// How much power the chip wants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chip {
+    #[default]
+    Other,
+    /// A Max or Ultra chip, which wants at least a 96 W adapter. `capped_case` is a 14-inch
+    /// laptop whose case caps its power and cooling below what the chip can draw, whatever the
+    /// adapter.
+    Large { capped_case: bool },
 }
 
 /// Where the Mac draws its power from, from `pmset -g ps`.
@@ -40,42 +51,46 @@ pub struct Power {
     pub mode: Option<Mode>,
     /// The Mac offers High Power Mode, so Automatic leaves speed behind.
     pub high_available: bool,
-    /// A Max or Ultra chip, which needs Apple's 140 W adapter at full load.
-    pub large_chip: bool,
+    pub chip: Chip,
     pub low_power: bool,
     pub thermal: Thermal,
     pub source: Option<Source>,
 }
 
-/// The smallest adapter a laptop with a Max chip runs its GPU at full clock on.
-pub const FULL_SPEED_WATTS: u32 = 140;
+/// The smallest adapter recommended for a laptop with a Max or Ultra chip.
+pub const RECOMMENDED_WATTS: u32 = 96;
 
 /// What holds the GPU back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Issue {
     LowPower,
     NotHighPower,
     Battery,
     Draining,
-    SmallAdapter(u32),
+    SmallAdapter { watts: u32, capped_case: bool },
     Hot(Thermal),
 }
 
 impl Issue {
-    pub fn describe(self) -> String {
+    pub fn describe(&self) -> String {
         match self {
             Issue::LowPower => "Low Power Mode is on.".into(),
             Issue::NotHighPower => "Energy Mode is Automatic, not High Power.".into(),
             Issue::Battery => "The Mac is running on battery.".into(),
             Issue::Draining => "The battery is draining although the adapter is plugged in.".into(),
-            Issue::SmallAdapter(w) => format!("The {w} W adapter is smaller than the {FULL_SPEED_WATTS} W this Mac needs at full load."),
+            Issue::SmallAdapter { watts, capped_case: false } => {
+                format!("The {watts} W adapter is under the {RECOMMENDED_WATTS} W recommended for a Max or Ultra chip.")
+            }
+            Issue::SmallAdapter { watts, capped_case: true } => format!(
+                "The {watts} W adapter is under the {RECOMMENDED_WATTS} W recommended for this Mac, though the power and cooling of a 14-inch MacBook Pro limit its GPU whatever the adapter."
+            ),
             Issue::Hot(Thermal::Critical) => "macOS reports a critical thermal state.".into(),
             Issue::Hot(_) => "macOS reports a serious thermal state.".into(),
         }
     }
 
     /// Fixed by switching Energy Mode, which the copied command does.
-    pub fn is_mode(self) -> bool {
+    pub fn is_mode(&self) -> bool {
         matches!(self, Issue::LowPower | Issue::NotHighPower)
     }
 }
@@ -100,8 +115,8 @@ impl Power {
                 if draining {
                     issues.push(Issue::Draining);
                 }
-                if let Some(w) = watts.filter(|w| self.large_chip && *w < FULL_SPEED_WATTS) {
-                    issues.push(Issue::SmallAdapter(w));
+                if let (Chip::Large { capped_case }, Some(watts)) = (self.chip, watts.filter(|w| *w < RECOMMENDED_WATTS)) {
+                    issues.push(Issue::SmallAdapter { watts, capped_case });
                 }
             }
             None => {}
@@ -192,6 +207,15 @@ pub fn parse_large_chip(brand: &str) -> bool {
     brand.ends_with(" Max") || brand.ends_with(" Ultra")
 }
 
+/// The 14-inch model with an M5 Pro or M5 Max chip, as `hw.model` names it on Apple's support
+/// page that identifies each model. Other models are left out until their limit is known.
+const CAPPED_CASES: &[&str] = &["Mac17,7", "Mac17,9"];
+
+/// Whether `hw.model` names a laptop whose case caps a Max chip's power whatever the adapter.
+pub fn parse_capped_case(hw_model: &str) -> bool {
+    CAPPED_CASES.contains(&hw_model.trim())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Watch, open_energy_settings, watch};
 
@@ -203,7 +227,7 @@ mod native {
 
     use rune::AppHandle;
 
-    use super::{ENERGY_SETTINGS_URL, Power, Thermal, parse_high_available, parse_large_chip, parse_mode, parse_source};
+    use super::{Chip, ENERGY_SETTINGS_URL, Power, Thermal, parse_capped_case, parse_high_available, parse_large_chip, parse_mode, parse_source};
     use crate::state::State;
 
     const EVERY: Duration = Duration::from_secs(30);
@@ -222,13 +246,17 @@ mod native {
     #[derive(Clone, Copy)]
     struct Machine {
         high_available: bool,
-        large_chip: bool,
+        chip: Chip,
     }
 
     fn read_machine() -> Machine {
         Machine {
             high_available: parse_high_available(&run("/usr/bin/pmset", &["-g", "cap"])),
-            large_chip: parse_large_chip(&run("/usr/sbin/sysctl", &["-n", "machdep.cpu.brand_string"])),
+            chip: if parse_large_chip(&run("/usr/sbin/sysctl", &["-n", "machdep.cpu.brand_string"])) {
+                Chip::Large { capped_case: parse_capped_case(&run("/usr/sbin/sysctl", &["-n", "hw.model"])) }
+            } else {
+                Chip::Other
+            },
         }
     }
 
@@ -237,7 +265,7 @@ mod native {
         Power {
             mode: parse_mode(&run("/usr/bin/pmset", &["-g"])),
             high_available: machine.high_available,
-            large_chip: machine.large_chip,
+            chip: machine.chip,
             low_power,
             thermal,
             source: parse_source(&run("/usr/bin/pmset", &["-g", "ps"]), &run("/usr/bin/pmset", &["-g", "ac"])),
@@ -358,28 +386,52 @@ mod tests {
     }
 
     #[test]
-    fn only_max_and_ultra_chips_want_the_large_adapter() {
+    fn only_max_and_ultra_chips_want_the_recommended_adapter() {
         assert!(parse_large_chip("Apple M5 Max\n"));
         assert!(parse_large_chip("Apple M2 Ultra"));
         assert!(!parse_large_chip("Apple M5 Pro"));
         assert!(!parse_large_chip(""));
     }
 
+    #[test]
+    fn only_the_14_inch_m5_macbook_pro_has_a_capped_case() {
+        assert!(parse_capped_case("Mac17,7\n"));
+        assert!(parse_capped_case("Mac17,9"));
+        assert!(!parse_capped_case("Mac17,6"), "the 16-inch model");
+        assert!(!parse_capped_case("Mac17,8"), "the 16-inch model");
+        assert!(!parse_capped_case("Mac16,8"), "unverified, so neutral");
+        assert!(!parse_capped_case("Mac17,77"));
+        assert!(!parse_capped_case(""));
+    }
+
     fn laptop(mode: Mode, source: Source) -> Power {
-        Power { mode: Some(mode), high_available: true, large_chip: true, source: Some(source), ..Power::default() }
+        Power { mode: Some(mode), high_available: true, chip: Chip::Large { capped_case: false }, source: Some(source), ..Power::default() }
     }
 
     #[test]
-    fn high_power_on_the_full_adapter_holds_nothing_back() {
-        let p = laptop(Mode::High, Source::Adapter { watts: Some(140), draining: false });
+    fn high_power_on_the_recommended_adapter_holds_nothing_back() {
+        let p = laptop(Mode::High, Source::Adapter { watts: Some(96), draining: false });
         assert_eq!(p.issues(), []);
-        assert_eq!(p.summary(), "High Power Mode, 140 W adapter");
+        assert_eq!(p.summary(), "High Power Mode, 96 W adapter");
+        let p = Power { chip: Chip::Large { capped_case: true }, ..p };
+        assert_eq!(p.issues(), [], "a larger adapter would not help the 14-inch case");
+    }
+
+    #[test]
+    fn a_small_adapter_is_named_without_promising_a_larger_one_fixes_it() {
+        let neutral = laptop(Mode::High, Source::Adapter { watts: Some(90), draining: false });
+        assert_eq!(neutral.issues(), [Issue::SmallAdapter { watts: 90, capped_case: false }]);
+        assert_eq!(neutral.issues()[0].describe(), "The 90 W adapter is under the 96 W recommended for a Max or Ultra chip.");
+        let capped = Power { chip: Chip::Large { capped_case: true }, ..neutral };
+        let words = capped.issues()[0].describe();
+        assert!(words.contains("under the 96 W recommended for this Mac"), "{words}");
+        assert!(words.contains("14-inch MacBook Pro limit its GPU whatever the adapter"), "{words}");
     }
 
     #[test]
     fn what_holds_the_gpu_back_is_named() {
         let p = laptop(Mode::Automatic, Source::Adapter { watts: Some(90), draining: true });
-        assert_eq!(p.issues(), [Issue::NotHighPower, Issue::Draining, Issue::SmallAdapter(90)]);
+        assert_eq!(p.issues(), [Issue::NotHighPower, Issue::Draining, Issue::SmallAdapter { watts: 90, capped_case: false }]);
         let p = Power { low_power: true, thermal: Thermal::Serious, ..laptop(Mode::Automatic, Source::Battery) };
         assert_eq!(p.issues(), [Issue::LowPower, Issue::Battery, Issue::Hot(Thermal::Serious)]);
         assert_eq!(p.summary(), "Low Power Mode, on battery, hot");
@@ -387,7 +439,7 @@ mod tests {
 
     #[test]
     fn automatic_is_fine_where_there_is_no_high_power_mode_and_small_adapters_suit_small_chips() {
-        let p = Power { high_available: false, large_chip: false, ..laptop(Mode::Automatic, Source::Adapter { watts: Some(70), draining: false }) };
+        let p = Power { high_available: false, chip: Chip::Other, ..laptop(Mode::Automatic, Source::Adapter { watts: Some(70), draining: false }) };
         assert_eq!(p.issues(), []);
     }
 

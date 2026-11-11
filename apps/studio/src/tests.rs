@@ -337,6 +337,7 @@ fn the_power_banner_names_the_causes_offers_the_fixes_and_stays_closed() {
     let detail = text_of(&rt, "power-detail");
     assert!(detail.contains("Energy Mode is Automatic"), "{detail}");
     assert!(detail.contains("90 W adapter"), "{detail}");
+    assert!(detail.contains("whatever the adapter"), "{detail}");
     assert!(text_of(&rt, "status-power-text").contains("Automatic power, 90 W adapter"));
     let (x, y) = rt.find("power-copy-command").unwrap();
     rt.pointer_down(x, y);
@@ -365,7 +366,7 @@ fn a_mac_at_full_speed_shows_no_banner_and_no_command() {
         s.power = Some(power::Power {
             mode: Some(power::Mode::High),
             high_available: true,
-            large_chip: true,
+            chip: power::Chip::Large { capped_case: false },
             source: Some(power::Source::Adapter { watts: Some(140), draining: false }),
             ..Default::default()
         });
