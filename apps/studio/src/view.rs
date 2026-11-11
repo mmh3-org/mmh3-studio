@@ -2,9 +2,9 @@ use std::sync::OnceLock;
 
 use rune::{Color, Cx, El, Spring, col, el, row, text};
 use rune_kit::shell::{self, PaneMotion, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Toast, ToastRegion, context_menu};
+use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, SegmentedControl, Toast, ToastRegion, context_menu};
 
-use crate::state::{Conn, Phase, State};
+use crate::state::{Conn, Pane, Phase, State};
 use crate::{composer, gallery, icons, preview};
 
 pub fn kit(dark: bool) -> &'static Kit {
@@ -13,15 +13,66 @@ pub fn kit(dark: bool) -> &'static Kit {
     if dark { DARK.get_or_init(|| Kit::neutral(true)) } else { LIGHT.get_or_init(|| Kit::neutral(false)) }
 }
 
+/// Below this width the gallery, the picture and the composer take turns filling the window:
+/// a phone, or a narrow browser window.
+pub const COMPACT_BELOW: f32 = 720.0;
+
+pub fn is_compact(s: &State) -> bool {
+    s.width > 0.0 && s.width < COMPACT_BELOW
+}
+
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let dark = cx.system_dark();
     let k = kit(dark);
     let mut layer = Vec::new();
+    let panes = if is_compact(s) { compact(s, k, cx, dark) } else { split(s, k, cx, dark) };
+    let panes = menu(s, k, panes, &mut layer);
+    confirm_delete(s, k, &mut layer);
+    if !s.notes.is_empty() {
+        layer.push(notes(s, k));
+    }
+    let body = col()
+        .key("window")
+        .w_full()
+        .h_full()
+        .fill(k.c.page)
+        .on_layout(|s: &mut State, r: [f32; 4]| s.width = r[2])
+        .child(col().key("split").w_full().grow(1.0).min_h(0.0).child(panes))
+        .child(status_bar(s, k));
+    rune_kit::root(body, layer)
+}
+
+/// One pane at a time under a switcher, with the picture's actions above the picture.
+fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
+    let [top, right, _, left] = cx.safe_area();
+    let labels = Pane::ALL.map(Pane::label);
+    let at = Pane::ALL.iter().position(|p| *p == s.pane);
+    let picker = SegmentedControl::new(&labels, at).label("Show").width(None).on_pick(|s: &mut State, i, _| s.pane = Pane::ALL[i]).build(k).key("pane-picker");
+    let mut head = col().key("compact-head").w_full().padding(8.0).pt(8.0 + top).gap(4.0).child(picker);
+    let body = match s.pane {
+        Pane::Gallery => col().key("compact-gallery").w_full().h_full().min_h(0.0).px(10.0).child(gallery::sidebar(s, k, dark)),
+        Pane::Picture => {
+            head = head.child(toolbar(s, k, true).build(k));
+            preview::main(s, k, cx)
+        }
+        Pane::Compose => composer::composer(s, k),
+    };
+    col()
+        .key("compact")
+        .w_full()
+        .h_full()
+        .pl(left)
+        .pr(right)
+        .child(head)
+        .child(col().key(format!("compact-{:?}", s.pane)).w_full().grow(1.0).min_h(0.0).child(body))
+}
+
+fn split(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
     let main = preview::main(s, k, cx);
-    let split = SplitView::new(main)
+    SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, gallery::sidebar(s, k, dark))
         .inspector(&s.inspector, |s: &mut State| &mut s.inspector, composer::composer(s, k))
-        .toolbar(toolbar(s, k))
+        .toolbar(toolbar(s, k, false))
         .titlebar_inset(cx.titlebar_inset())
         .frame_inset(8.0)
         .toolbar_in_panel()
@@ -29,20 +80,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header())
         .pane_motion(PaneMotion::new().spring(Spring::new(0.3, 0.0)).scale_with_width(480.0, 0.15, 0.3).fade_tail(0.15))
         .reduced_motion(cx.is_reduced_motion())
-        .build(k);
-    let split = menu(s, k, split, &mut layer);
-    confirm_delete(s, k, &mut layer);
-    if !s.notes.is_empty() {
-        layer.push(notes(s, k));
-    }
-    let body =
-        col().key("window").w_full().h_full().fill(k.c.page).child(col().key("split").w_full().grow(1.0).min_h(0.0).child(split)).child(status_bar(s, k));
-    rune_kit::root(body, layer)
+        .build(k)
 }
 
 type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
 
-fn toolbar(s: &State, k: &Kit) -> Toolbar {
+fn toolbar(s: &State, k: &Kit, compact: bool) -> Toolbar {
     let title = s.selected_gen().map_or_else(|| "mmh3 studio".to_owned(), |g| gallery::title(g).lines().next().unwrap_or_default().to_owned());
     let mut actions = row().key("toolbar-actions").gap(2.0).center_y();
     if let Some(g) = s.selected_gen() {
@@ -79,6 +122,9 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
         let i = id.clone();
         actions = actions.child(act(&icons::TRASH, "delete", "Delete", running, Box::new(move |s, _| s.delete(&i))));
     }
+    if compact {
+        return Toolbar::new().leading(title_text(title, k)).trailing(actions);
+    }
     actions = actions.child(
         IconButton::new(&shell::INSPECTOR)
             .variant(IconButtonVariant::GhostMuted)
@@ -89,8 +135,11 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
             .build(k)
             .key("inspector-toggle"),
     );
-    let title = text(title).key("toolbar-title").role("heading").font(k.ty.ui_medium).color(k.c.text_base).truncate().shrink().min_w(0.0);
-    Toolbar::new().leading(title).trailing(actions)
+    Toolbar::new().leading(title_text(title, k)).trailing(actions)
+}
+
+fn title_text(title: String, k: &Kit) -> El {
+    text(title).key("toolbar-title").role("heading").font(k.ty.ui_medium).color(k.c.text_base).truncate().shrink().min_w(0.0)
 }
 
 fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
@@ -216,7 +265,7 @@ fn status_bar(s: &State, k: &Kit) -> El {
         .fill(c.bg_base)
         .child(el().key("status-dot").size(8.0, 8.0).radius(4.0).fill(dot).a11y_hidden())
         .child(item("status-connection", state, c.text_muted));
-    if let Conn::Connected(st) = &s.conn {
+    if let (Conn::Connected(st), false) = (&s.conn, is_compact(s)) {
         let models = match &st.models {
             Some(m) if m.is_empty() => "No models resident".to_owned(),
             Some(m) => format!("Resident: {}", m.iter().map(|m| model_name(m)).collect::<Vec<_>>().join(", ")),

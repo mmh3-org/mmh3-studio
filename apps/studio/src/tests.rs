@@ -300,3 +300,31 @@ fn edit_this_picture_attaches_the_finished_png() {
     assert_eq!(rt.state.references.len(), 1);
     assert_eq!(rt.state.references[0].path, rt.state.selected_gen().and_then(|g| g.file().cloned()).unwrap());
 }
+
+#[test]
+fn a_phone_wide_window_shows_one_pane_at_a_time() {
+    let mut s = State::offline();
+    scenes::gallery(&mut s);
+    let mut rt = Runtime::new(s, view::view, (390.0, 844.0), Env { system_dark: false, scale: 3.0 });
+    for _ in 0..5 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(rt.find("pane-picker").is_some());
+    assert!(rt.find("main").is_some(), "the picture shows first");
+    assert!(rt.find("composer").is_none() && rt.find("gallery-header").is_none());
+    rt.update(|s, _| s.pane = state::Pane::Compose);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("composer").is_some() && rt.find("main").is_none());
+    rt.update(|s, _| s.pane = state::Pane::Gallery);
+    rt.frame(1.0 / 60.0);
+    let (x, y) = rt.find("7c01aa2e0002").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.pane, state::Pane::Picture, "choosing a picture shows it");
+    assert_eq!(rt.state.selected.as_deref(), Some("7c01aa2e0002"));
+
+    let wide = runtime(scenes::gallery, false);
+    assert!(wide.find("pane-picker").is_none());
+    assert!(wide.find("composer").is_some() && wide.find("main").is_some());
+}

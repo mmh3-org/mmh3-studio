@@ -491,7 +491,7 @@ fn add_files(inner: &Rc<Inner>, files: &FileList) {
         s.dropping = false;
         if !paths.is_empty() {
             s.add_references(&paths);
-            s.inspector.set_open(true);
+            s.show_composer();
         }
         if rejected > 0 {
             s.note("mmh3 edits PNG and JPEG pictures.", None, true);

@@ -7,7 +7,7 @@ use rune::{El, SurfaceFit, col, el, memo, row, text};
 use rune_kit::shell::Sidebar;
 use rune_kit::{Kit, Progress, Spinner};
 
-use crate::state::{Gen, Phase, Picture, State};
+use crate::state::{Gen, Pane, Phase, Picture, State};
 use crate::view::kit;
 
 pub const ROW: f32 = 72.0;
@@ -139,7 +139,10 @@ fn build_row(g: &Gen, selected: bool, clock: f64, k: &Kit) -> El {
         .focusable(true)
         .focus_selected(selected)
         .hover_group()
-        .on_press(move |s: &mut State| s.select(&id))
+        .on_press(move |s: &mut State| {
+            s.select(&id);
+            s.pane = Pane::Picture;
+        })
         .on_secondary_press(move |s: &mut State, p, _| {
             s.select(&menu_id);
             s.menu = Some((menu_id.clone(), p));

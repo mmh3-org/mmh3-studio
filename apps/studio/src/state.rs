@@ -179,6 +179,27 @@ pub enum SizeChoice {
     Custom,
 }
 
+/// The one pane a compact window shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pane {
+    Gallery,
+    #[default]
+    Picture,
+    Compose,
+}
+
+impl Pane {
+    pub const ALL: [Pane; 3] = [Pane::Gallery, Pane::Picture, Pane::Compose];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Pane::Gallery => "Generations",
+            Pane::Picture => "Picture",
+            Pane::Compose => "Compose",
+        }
+    }
+}
+
 pub struct Note {
     pub id: u64,
     pub title: String,
@@ -204,6 +225,10 @@ pub struct State {
     pub references: Vec<Reference>,
     /// Files are being dragged over the composer.
     pub dropping: bool,
+    /// The window's width in points, once laid out; below [`crate::view::COMPACT_BELOW`] the
+    /// panes take turns.
+    pub width: f32,
+    pub pane: Pane,
     pub preview: Option<(String, Image)>,
     pub stage: StageZoom,
     pub sidebar: PaneState,
@@ -258,6 +283,8 @@ impl State {
             seed: TextEdit::new(random_seed().to_string()),
             references: Vec::new(),
             dropping: false,
+            width: 0.0,
+            pane: Pane::default(),
             preview: None,
             stage: StageZoom::default(),
             sidebar: PaneState::new(300.0).range(220.0, 480.0),
@@ -356,6 +383,7 @@ impl State {
         let id = format!("local-{}", self.next_local);
         self.gens.insert(0, Gen { id: id.clone(), request: Some(r.clone()), queued: None, phase: Phase::Sending, picture: Picture::None, revision: 0 });
         self.select(&id);
+        self.pane = Pane::Picture;
         if let Some(net) = &self.net {
             net.submit(id, r);
         }
@@ -708,8 +736,14 @@ impl State {
     pub fn edit_picture(&mut self, id: &str) {
         if let Some(file) = self.item(id).and_then(|g| g.file().cloned()) {
             self.add_references(&[file]);
-            self.inspector.set_open(true);
+            self.show_composer();
         }
+    }
+
+    /// Brings the composer into view, wide or compact.
+    pub fn show_composer(&mut self) {
+        self.inspector.set_open(true);
+        self.pane = Pane::Compose;
     }
 
     pub fn randomise_seed(&mut self) {
