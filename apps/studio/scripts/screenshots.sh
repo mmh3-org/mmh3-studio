@@ -6,13 +6,13 @@ bin=${CARGO_TARGET_DIR:-../../target}/release
 app=$bin/mmh3-studio
 root=$bin/screenshot-dirs
 mkdir -p screenshots
-for scene in empty disconnected running gallery failed custom-size offline-selected confirm-delete references power; do
+for scene in empty disconnected running gallery failed custom-size offline-selected confirm-delete timing references power; do
   for theme in light dark; do
     $app --snap "screenshots/scene-$scene-$theme.png" --scene "$scene" --size 1320x860 --scale 2 --theme "$theme" --at 1.0 >/dev/null
   done
 done
 $app --tree screenshots/scene-gallery-tree.json --scene gallery --at 1.0 >/dev/null
-for scene in disconnected running failed offline-selected power; do
+for scene in disconnected running gallery timing failed offline-selected power; do
   $app --snap "screenshots/small-$scene.png" --scene "$scene" --size 1040x680 --scale 2 --at 1.0 >/dev/null
 done
 

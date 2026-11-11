@@ -13,12 +13,14 @@ use std::time::Duration;
 use rune::{AppSpec, ImageCache, KeyEvent, Tx};
 
 mod composer;
+mod estimate;
 mod gallery;
 mod icons;
 mod net;
 mod preview;
 #[cfg(not(target_arch = "wasm32"))]
 mod scenes;
+mod stage;
 mod state;
 mod view;
 

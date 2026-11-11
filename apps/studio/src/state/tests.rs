@@ -9,7 +9,7 @@ fn online() -> State {
 }
 
 fn server(id: &str, state: api::State) -> Generation {
-    Generation { error: None, id: id.into(), queued: 1, seconds: None, state, step: None, steps: None }
+    Generation { error: None, id: id.into(), queued: 1, seconds: None, state, step: None, steps: None, timings: None }
 }
 
 fn running(id: &str, step: u32) -> Generation {
@@ -41,7 +41,7 @@ fn running_keeps_the_time_it_started_and_done_asks_for_the_picture() {
     let done = Generation { seconds: Some(8.4), ..server("a", api::State::Done) };
     let fx: Vec<Effect> = step(&mut phase, &done, 9.0).into_iter().collect();
     assert_eq!(fx, [Effect::FetchImage]);
-    assert_eq!(phase, Phase::Done { seconds: 8.4 });
+    assert_eq!(phase, Phase::Done { seconds: 8.4, timings: None });
     assert!(step(&mut phase, &done, 9.5).is_empty(), "a repeated end asks for nothing");
 }
 
@@ -229,7 +229,7 @@ fn generate_needs_a_prompt_and_a_valid_size_and_seed() {
     s = online();
     assert_eq!(s.request().unwrap_err(), "Write a prompt first.");
     s.prompt.replace_text("  a fox ");
-    s.size = SizeChoice::Custom;
+    s.custom_size = true;
     s.custom_w.replace_text("1000");
     assert!(s.request().unwrap_err().contains("multiples of 32"));
     s.custom_w.replace_text("1024");

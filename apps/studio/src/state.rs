@@ -3,12 +3,13 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::{self, Generation, ImageRequest, Status};
+use crate::api::{self, Generation, ImageRequest, Status, Timings};
+use crate::estimate::{self, Model, Sample};
 use crate::power::{Issue, Power};
-use crate::sizes::{self, PRESETS, SizeError};
+use crate::sizes::{self, ASPECTS, Quality, SizeError};
+use crate::stage::Zoom;
 use rune::machine::Effects;
 use rune::{Image, ImageCache, PointerPress, TextEdit, Tx};
-use rune_kit::image_zoom::StageZoom;
 use rune_kit::shell::PaneState;
 
 use crate::net::Net;
@@ -44,6 +45,7 @@ pub enum Phase {
     },
     Done {
         seconds: f64,
+        timings: Option<Timings>,
     },
     Failed(String),
 }
@@ -72,7 +74,7 @@ pub fn step(phase: &mut Phase, g: &Generation, now: f64) -> Effects<Effect> {
             };
             Phase::Running { step: g.step, steps: g.steps.unwrap_or(api::IMAGE_STEPS), since }
         }
-        api::State::Done => Phase::Done { seconds: g.seconds.unwrap_or_default() },
+        api::State::Done => Phase::Done { seconds: g.seconds.unwrap_or_default(), timings: g.timings.clone() },
         api::State::Failed => Phase::Failed(g.error.clone().unwrap_or_else(|| "The server gave no reason.".into())),
     };
     match (&was, &*phase) {
@@ -179,10 +181,17 @@ pub fn picture_tag(n: usize) -> String {
     format!("<Picture {n}>")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SizeChoice {
-    Preset(usize),
-    Custom,
+/// A size from the picker: a quality and one of [`ASPECTS`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SizeChoice {
+    pub quality: Quality,
+    pub aspect: usize,
+}
+
+impl SizeChoice {
+    pub fn size(self) -> (u32, u32) {
+        ASPECTS[self.aspect].size(self.quality)
+    }
 }
 
 /// The one pane a compact window shows.
@@ -225,6 +234,8 @@ pub struct State {
     pub selected: Option<String>,
     pub prompt: TextEdit,
     pub size: SizeChoice,
+    /// The custom size is open, and asked for instead of [`State::size`].
+    pub custom_size: bool,
     pub custom_w: TextEdit,
     pub custom_h: TextEdit,
     pub seed: TextEdit,
@@ -236,7 +247,9 @@ pub struct State {
     pub width: f32,
     pub pane: Pane,
     pub preview: Option<(String, Image)>,
-    pub stage: StageZoom,
+    pub zoom: Zoom,
+    /// The selected picture's timing details are open.
+    pub timing_open: bool,
     pub sidebar: PaneState,
     pub inspector: PaneState,
     pub menu: Option<(String, PointerPress)>,
@@ -296,7 +309,8 @@ impl State {
             gens: Vec::new(),
             selected: None,
             prompt: TextEdit::new(""),
-            size: SizeChoice::Preset(0),
+            size: SizeChoice::default(),
+            custom_size: false,
             custom_w: TextEdit::new("1536"),
             custom_h: TextEdit::new("1024"),
             seed: TextEdit::new(random_seed().to_string()),
@@ -305,7 +319,8 @@ impl State {
             width: 0.0,
             pane: Pane::default(),
             preview: None,
-            stage: StageZoom::default(),
+            zoom: Zoom::default(),
+            timing_open: false,
             sidebar: PaneState::new(300.0).range(220.0, 480.0),
             inspector: PaneState::new(340.0).range(300.0, 460.0),
             menu: None,
@@ -359,10 +374,40 @@ impl State {
     }
 
     pub fn chosen_size(&self) -> Result<(u32, u32), SizeError> {
-        match self.size {
-            SizeChoice::Preset(i) => Ok((PRESETS[i].width, PRESETS[i].height)),
-            SizeChoice::Custom => sizes::custom(&self.custom_w.text, &self.custom_h.text),
+        if self.custom_size { sizes::custom(&self.custom_w.text, &self.custom_h.text) } else { Ok(self.size.size()) }
+    }
+
+    pub fn pick_size(&mut self, size: SizeChoice) {
+        self.size = size;
+        self.custom_size = false;
+    }
+
+    /// Opens the custom size on the size picked so far, or closes it on the picker's.
+    pub fn toggle_custom_size(&mut self) {
+        self.custom_size = !self.custom_size;
+        if self.custom_size {
+            let (w, h) = self.size.size();
+            self.custom_w.replace_text(w.to_string());
+            self.custom_h.replace_text(h.to_string());
         }
+    }
+
+    /// How long pictures take here, fitted from the finished generations, newest first.
+    pub fn time_model(&self) -> Model {
+        estimate::fit(self.gens.iter().filter_map(|g| match (&g.phase, g.size()) {
+            (Phase::Done { seconds, timings }, Some((w, h))) => Some(Sample { mp: sizes::megapixels(w, h), seconds: *seconds, timings: timings.clone() }),
+            _ => None,
+        }))
+    }
+
+    /// The server answers but holds no `dit` model, so the next generation loads it first.
+    pub fn cold(&self) -> bool {
+        matches!(&self.conn, Conn::Connected(Status { models: Some(m), generating: None, .. }) if !m.iter().any(|m| m == "dit"))
+    }
+
+    /// macOS keeps the GPU at a low clock, which the estimates do not know about.
+    pub fn gpu_held_back(&self) -> bool {
+        self.power.as_ref().is_some_and(|p| p.issues().iter().any(Issue::is_clock))
     }
 
     pub fn seed_value(&self) -> Option<u64> {
@@ -676,7 +721,8 @@ impl State {
             return;
         }
         self.selected = Some(id.to_owned());
-        self.stage = StageZoom::default();
+        self.zoom = Zoom::default();
+        self.timing_open = false;
         self.fetch_image(id, true);
         self.load_preview();
     }

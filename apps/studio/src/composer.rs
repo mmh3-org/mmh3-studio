@@ -1,5 +1,6 @@
 use crate::api::MAX_REFERENCES;
-use crate::sizes::{PRESETS, megapixels};
+use crate::estimate::{Model, approx};
+use crate::sizes::{ASPECTS, MULTIPLE, Quality, megapixels};
 use rune::{El, Key, KeyEvent, SurfaceFit, Tx, col, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner, TextArea, TextInput};
 
@@ -16,80 +17,125 @@ fn section(title: &str, k: &Kit) -> El {
     text(title.to_owned()).font(k.ty.small_medium).color(k.c.text_faint)
 }
 
-fn tile(s: &State, i: Option<usize>, k: &Kit) -> El {
+/// One choice in a radio group: a bordered tile, raised while it is the one chosen.
+fn option(key: String, label: String, on: bool, k: &Kit, content: El, pick: impl Fn(&mut State) + 'static) -> El {
     let c = &k.c;
-    let (choice, title, detail) = match i {
-        Some(i) => {
-            let p = PRESETS[i];
-            (SizeChoice::Preset(i), format!("{} × {}", p.width, p.height), format!("{} · {} · {:.1} MP", p.tier, p.aspect, megapixels(p.width, p.height)))
-        }
-        None => (SizeChoice::Custom, "Custom".to_owned(), "Multiples of 32".to_owned()),
-    };
-    let on = s.size == choice;
-    let key = match i {
-        Some(i) => format!("size-{i}"),
-        None => "size-custom".to_owned(),
-    };
-    let t = col()
+    let t = content
         .key(key)
         .role("radio")
-        .label(format!("{title}, {detail}"))
+        .label(label)
         .focusable(true)
         .focus_selected(on)
         .w_full()
-        .px(10.0)
-        .py(8.0)
-        .gap(2.0)
         .radius(8.0)
         .border(if on { 1.5 } else { 1.0 }, if on { c.border_focus } else { c.border_base })
         .fill(if on { c.layer_02 } else { c.bg_base })
-        .on_press(move |s: &mut State| s.size = choice)
-        .child(text(title).font(k.ty.ui_medium).color(c.text_base).a11y_hidden())
-        .child(text(detail).font(k.ty.small).color(c.text_muted).truncate().a11y_hidden());
+        .on_press(pick);
     k.interactive(t)
 }
 
-fn sizes(s: &State, k: &Kit) -> El {
-    let mut grid = row().key("sizes").role("radiogroup").focus_group().label("Size").w_full().equal_columns(2).gaps(8.0, 8.0);
-    let n = PRESETS.len() + 1;
-    for i in 0..PRESETS.len() {
-        grid = grid.child(tile(s, Some(i), k).position_in_set(i + 1, n));
-    }
-    grid = grid.child(tile(s, None, k).position_in_set(n, n));
-    let mut out = col().w_full().gap(8.0).child(section("Size", k)).child(grid);
-    if s.size == SizeChoice::Custom {
-        let error = s.chosen_size().err();
-        let field = |edit: &rune::TextEdit, label: &str, key: &str, lens: fn(&mut State) -> &mut rune::TextEdit| {
-            TextInput::new(edit)
-                .label(label)
-                .placeholder("1024")
-                .invalid(error.is_some())
-                .on_edit(lens)
-                .build(k)
-                .key(key.to_owned())
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0)
-        };
-        out = out.child(
-            row()
-                .key("custom-size")
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(field(&s.custom_w, "Width", "custom-width", |s| &mut s.custom_w))
-                .child(text("×").font(k.ty.ui).color(k.c.text_faint))
-                .child(field(&s.custom_h, "Height", "custom-height", |s| &mut s.custom_h)),
+/// What a size is, and how long it should take here: "2048 × 2048 · 4.2 MP · ≈ 30 s".
+fn estimate(s: &State, model: &Model, (w, h): (u32, u32)) -> String {
+    let seconds = model.seconds(megapixels(w, h), s.cold());
+    let slower = if s.gpu_held_back() { " · may be slower" } else { "" };
+    format!("{w} × {h} · {:.1} MP · ≈ {}{slower}", megapixels(w, h), approx(seconds))
+}
+
+fn quality(s: &State, model: &Model, k: &Kit) -> El {
+    let c = &k.c;
+    let mut group = row().key("quality").role("radiogroup").focus_group().label("Quality").w_full().equal_columns(2).gaps(8.0, 8.0);
+    for (i, q) in Quality::ALL.into_iter().enumerate() {
+        let pick = SizeChoice { quality: q, ..s.size };
+        let (w, h) = pick.size();
+        let time = format!("≈ {}", approx(model.seconds(megapixels(w, h), s.cold())));
+        let on = !s.custom_size && s.size.quality == q;
+        let content = col()
+            .px(10.0)
+            .py(8.0)
+            .gap(2.0)
+            .child(text(q.label()).font(k.ty.ui_medium).color(c.text_base).a11y_hidden())
+            .child(text(format!("{} · {time}", q.about())).key("quality-time").font(k.ty.small).color(c.text_muted).truncate().a11y_hidden());
+        let label = format!("{}, {}, {time}", q.label(), q.about());
+        group = group.child(
+            option(format!("quality-{}", q.label().to_lowercase()), label, on, k, content, move |s: &mut State| s.pick_size(pick)).position_in_set(i + 1, 2),
         );
-        let note = if let Some(e) = &error {
-            text(e.to_string()).key("size-error").role("alert").font(k.ty.small).color(k.c.danger.fg).wrap()
-        } else {
-            let (w, h) = s.chosen_size().unwrap_or_default();
-            text(format!("{:.1} MP", megapixels(w, h))).key("size-note").font(k.ty.small).color(k.c.text_faint)
-        };
-        out = out.child(note);
     }
-    out
+    group
+}
+
+/// A rectangle in the aspect's shape, 18 points on its long side.
+fn shape(w: u32, h: u32, ink: rune::Color) -> El {
+    let long = w.max(h) as f32;
+    let side = |v: u32| (18.0 * v as f32 / long).round();
+    row().size(18.0, 18.0).center().a11y_hidden().child(el().size(side(w), side(h)).radius(2.0).border(1.25, ink))
+}
+
+fn aspects(s: &State, k: &Kit) -> El {
+    let c = &k.c;
+    let mut group = row().key("aspects").role("radiogroup").focus_group().label("Aspect ratio").w_full().equal_columns(4).gaps(6.0, 6.0);
+    for (i, a) in ASPECTS.iter().enumerate() {
+        let pick = SizeChoice { aspect: i, ..s.size };
+        let on = !s.custom_size && s.size.aspect == i;
+        let (w, h) = a.full;
+        let ink = if on { c.icon_base } else { c.icon_muted };
+        let content = col()
+            .py(8.0)
+            .gap(4.0)
+            .items_center()
+            .child(shape(w, h, ink))
+            .child(text(a.name).font(k.ty.small_medium).color(if on { c.text_base } else { c.text_muted }).a11y_hidden());
+        group = group.child(
+            option(format!("aspect-{i}"), a.name.to_owned(), on, k, content, move |s: &mut State| s.pick_size(pick)).position_in_set(i + 1, ASPECTS.len()),
+        );
+    }
+    group
+}
+
+fn custom_size(s: &State, k: &Kit) -> El {
+    let error = s.chosen_size().err();
+    let field = |edit: &rune::TextEdit, label: &str, key: &str, lens: fn(&mut State) -> &mut rune::TextEdit| {
+        TextInput::new(edit).label(label).placeholder("1024").invalid(error.is_some()).on_edit(lens).build(k).key(key.to_owned()).grow(1.0).shrink().min_w(0.0)
+    };
+    row()
+        .key("custom-size")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(field(&s.custom_w, "Width", "custom-width", |s| &mut s.custom_w))
+        .child(text("×").font(k.ty.ui).color(k.c.text_faint))
+        .child(field(&s.custom_h, "Height", "custom-height", |s| &mut s.custom_h))
+}
+
+fn sizes(s: &State, k: &Kit) -> El {
+    let c = &k.c;
+    let model = s.time_model();
+    let open = s.custom_size;
+    let disclosure = Button::new("Custom size…")
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .icon(if open { k.glyph.triangle_down } else { k.glyph.triangle_right })
+        .help(format!("Any width and height, in multiples of {MULTIPLE}"))
+        .expanded(open)
+        .on_press(State::toggle_custom_size)
+        .build(k)
+        .key("custom-toggle");
+    let mut custom = col().w_full().gap(8.0).child(row().w_full().child(disclosure));
+    if open {
+        custom = custom.child(custom_size(s, k));
+    }
+    let out = col()
+        .w_full()
+        .gap(14.0)
+        .child(col().w_full().gap(8.0).child(section("Quality", k)).child(quality(s, &model, k)))
+        .child(col().w_full().gap(8.0).child(section("Aspect ratio", k)).child(aspects(s, k)))
+        .child(custom);
+    let summary = match s.chosen_size() {
+        Ok(size) => {
+            text(estimate(s, &model, size)).key("size-summary").font(k.ty.small).color(if s.gpu_held_back() { c.warning.fg } else { c.text_muted }).wrap()
+        }
+        Err(e) => text(e.to_string()).key("size-error").role("alert").font(k.ty.small).color(c.danger.fg).wrap(),
+    };
+    out.child(summary)
 }
 
 fn seed(s: &State, k: &Kit) -> El {

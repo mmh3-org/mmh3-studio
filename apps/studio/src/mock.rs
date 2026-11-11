@@ -88,6 +88,7 @@ impl Job {
             state: self.state,
             step: if running { self.step } else { None },
             steps: if running { self.steps } else { None },
+            timings: None,
         }
     }
 }

@@ -56,13 +56,38 @@ fn cmd_return_in_the_prompt_generates_and_return_types_a_newline() {
 }
 
 #[test]
-fn picking_a_size_tile_selects_it() {
+fn quality_and_aspect_ratio_pick_the_size_together() {
     let mut rt = runtime(scenes::empty, false);
-    let (x, y) = rt.find("size-5").unwrap();
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.chosen_size(), Ok((2048, 2048)));
+    tap(&mut rt, "aspect-6");
+    assert_eq!(rt.state.chosen_size(), Ok((1536, 2720)));
+    tap(&mut rt, "quality-final");
     assert_eq!(rt.state.chosen_size(), Ok((3072, 5472)));
+    tap(&mut rt, "aspect-7");
+    assert_eq!(rt.state.chosen_size(), Ok((6272, 2688)));
+    assert!(text_of(&rt, "size-summary").starts_with("6272 × 2688 · 16.9 MP · ≈ "), "{}", text_of(&rt, "size-summary"));
+}
+
+#[test]
+fn the_custom_size_starts_from_the_picked_size_and_a_pick_closes_it() {
+    let mut rt = runtime(scenes::empty, false);
+    tap(&mut rt, "aspect-5");
+    tap(&mut rt, "custom-toggle");
+    assert!(rt.state.custom_size);
+    assert_eq!((rt.state.custom_w.text.as_str(), rt.state.custom_h.text.as_str()), ("2720", "1536"));
+    assert!(rt.find("custom-width").is_some());
+    tap(&mut rt, "aspect-0");
+    assert!(!rt.state.custom_size);
+    assert!(rt.find("custom-width").is_none());
+    assert_eq!(rt.state.chosen_size(), Ok((2048, 2048)));
+}
+
+#[test]
+fn the_estimate_says_a_held_back_gpu_may_be_slower() {
+    let rt = runtime(scenes::power, false);
+    assert!(text_of(&rt, "size-summary").ends_with("· may be slower"), "{}", text_of(&rt, "size-summary"));
+    let rt = runtime(scenes::empty, false);
+    assert!(!text_of(&rt, "size-summary").contains("slower"));
 }
 
 #[test]
@@ -90,8 +115,50 @@ fn running_rows_show_their_step_and_the_preview_its_progress() {
 #[test]
 fn the_gallery_scene_shows_the_preview_stage_and_how_long_it_took() {
     let rt = runtime(scenes::gallery, false);
-    assert!(rt.find("artifact-stage").is_some());
+    assert!(rt.find(stage::KEY).is_some());
     assert!(rt.find("took").is_some());
+    assert!(text_of(&rt, "facts-text").starts_with("5472 × 3072 · 16.8 MP · seed 4127"));
+    assert!(rt.find("details").is_none(), "nothing is left under the picture");
+}
+
+#[test]
+fn the_time_opens_where_it_went_and_a_press_outside_closes_it() {
+    let mut rt = runtime(scenes::gallery, false);
+    assert!(rt.find("timing").is_none());
+    tap(&mut rt, "took");
+    assert!(rt.state.timing_open);
+    assert!(rt.find("timing-bar").is_some());
+    let rows = rt.elements().into_iter().filter_map(|e| e.text).collect::<Vec<_>>();
+    assert!(rows.iter().any(|t| t == "6 steps, 37.9 s each"), "{rows:?}");
+    tap(&mut rt, "timing-scrim");
+    assert!(!rt.state.timing_open);
+}
+
+#[test]
+fn without_stage_timings_the_details_say_the_split_is_an_estimate() {
+    let mut rt = runtime(scenes::gallery, false);
+    rt.update(|s, _| {
+        s.select("7c01aa2e0002");
+        s.timing_open = true;
+    });
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(text_of(&rt, "timing-note").contains("only the total"));
+}
+
+#[test]
+fn the_zoom_controls_in_the_toolbar_zoom_show_the_level_and_fit() {
+    let mut rt = runtime(scenes::gallery, false);
+    let fitted = rt.state.zoom.level();
+    assert!(fitted < 100, "a 16 MP picture fits below its pixels: {fitted}%");
+    tap(&mut rt, "zoom-in");
+    assert!(rt.state.zoom.level() > fitted);
+    tap(&mut rt, "zoom-level");
+    assert_eq!(rt.state.zoom.level(), 100);
+    tap(&mut rt, "zoom-fit");
+    assert_eq!(rt.state.zoom.level(), fitted);
+    assert!(rt.find("preview-controls").is_none(), "no controls float over the picture");
 }
 
 #[test]
@@ -141,16 +208,16 @@ fn a_note_from_the_background_stays_up_after_an_idle_spell() {
 }
 
 #[test]
-fn the_size_tiles_are_one_tab_stop_and_arrows_move_between_them() {
+fn the_aspect_ratios_are_one_tab_stop_and_arrows_move_between_them() {
     let mut rt = runtime(scenes::empty, false);
-    tap(&mut rt, "size-0");
-    assert_eq!(focused(&rt).as_deref(), Some("size-0"));
+    tap(&mut rt, "aspect-0");
+    assert_eq!(focused(&rt).as_deref(), Some("aspect-0"));
     rt.key(KeyEvent { key: Key::Right, mods: Mods::default() });
     rt.frame(1.0 / 60.0);
-    assert_eq!(focused(&rt).as_deref(), Some("size-1"));
+    assert_eq!(focused(&rt).as_deref(), Some("aspect-1"));
     rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
     rt.frame(1.0 / 60.0);
-    assert!(!focused(&rt).is_some_and(|k| k.starts_with("size-")), "Tab leaves the group: {:?}", focused(&rt));
+    assert!(!focused(&rt).is_some_and(|k| k.starts_with("aspect-")), "Tab leaves the group: {:?}", focused(&rt));
 }
 
 #[test]

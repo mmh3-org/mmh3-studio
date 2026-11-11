@@ -1,17 +1,17 @@
 use std::fmt::Write as _;
 
+use crate::api::Timings;
 use crate::sizes::megapixels;
 use rune::{Cx, El, col, el, icon, row, text};
-use rune_kit::image_zoom::Stage;
-use rune_kit::{Button, ButtonVariant, Kit, Progress, Spinner};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, Popover, Progress, Spinner};
 
-use crate::gallery::{elapsed, stage};
-use crate::icons;
+use crate::gallery::{elapsed, stage as step_stage};
 use crate::state::{Conn, Gen, Phase, Picture, State};
+use crate::{icons, stage};
 
-pub fn main(s: &State, k: &Kit, cx: &mut Cx<State>) -> El {
+pub fn main(s: &State, k: &Kit, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
     let body = match s.selected_gen() {
-        Some(g) => generation(s, g, k, cx),
+        Some(g) => generation(s, g, k, cx, layer),
         None => match &s.conn {
             Conn::Disconnected(why) => disconnected(s, why, k),
             _ => empty(s, k),
@@ -144,39 +144,6 @@ fn banner(s: &State, k: &Kit) -> El {
         )
 }
 
-fn caption(label: &str, value: String, k: &Kit) -> El {
-    col().gap(2.0).child(text(label.to_owned()).font(k.ty.small).color(k.c.text_faint)).child(text(value).font(k.ty.ui_medium).color(k.c.text_base))
-}
-
-/// What the studio knows of a generation: what it asked for, and how long the server says it
-/// took. The server times the whole generation, not its stages.
-fn facts(s: &State, g: &Gen, k: &Kit) -> El {
-    let mut facts = row().key("facts").gap(24.0).flex_wrap();
-    let decoded = s.preview.as_ref().filter(|(id, _)| *id == g.id).and_then(|(_, img)| img.size());
-    if let Some((w, h)) = g.size().or(decoded.map(|[w, h]| (w, h))) {
-        facts = facts.child(caption("Size", format!("{w} × {h} · {:.1} MP", megapixels(w, h)), k));
-    }
-    if let Some(seed) = g.seed() {
-        facts = facts.child(caption("Seed", seed.to_string(), k));
-    }
-    match g.references().len() {
-        0 => {}
-        1 => facts = facts.child(caption("Edits", "1 picture".into(), k)),
-        n => facts = facts.child(caption("Edits", format!("{n} pictures"), k)),
-    }
-    if let Phase::Done { seconds } = g.phase {
-        facts = facts.child(caption("Took", format!("{seconds:.1} s · {} steps", crate::api::IMAGE_STEPS), k).key("took"));
-    }
-    if g.request.is_none() {
-        facts = facts.child(caption("Prompt", "Asked for outside the studio".into(), k));
-    }
-    facts
-}
-
-fn footer(s: &State, g: &Gen, k: &Kit) -> El {
-    col().key("details").w_full().px(20.0).py(14.0).gap(12.0).border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted).child(facts(s, g, k))
-}
-
 fn placeholder(g: &Gen, k: &Kit, content: El) -> El {
     let (w, h) = g.size().unwrap_or((1, 1));
     let ratio = w.max(1) as f32 / h.max(1) as f32;
@@ -200,7 +167,7 @@ fn progress(s: &State, g: &Gen, k: &Kit) -> El {
             ("Waiting in the queue".to_owned(), if ahead > 0 { format!("{ahead} ahead of it") } else { String::new() }, None)
         }
         Phase::Running { step, steps, since } => {
-            let (headline, value) = stage(g, *step, *steps);
+            let (headline, value) = step_stage(g, *step, *steps);
             let value = step.filter(|k| k < steps).map(|_| value);
             (headline, format!("{} elapsed", elapsed(*since, s.clock)), value)
         }
@@ -247,20 +214,10 @@ fn failed(s: &State, g: &Gen, why: &str, k: &Kit) -> El {
     placeholder(g, k, card)
 }
 
-fn image(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
-    let ready = s.preview.as_ref().filter(|(id, _)| *id == g.id).map(|(_, img)| img).filter(|img| img.is_ready());
-    match ready {
+fn image(s: &State, g: &Gen, k: &Kit) -> El {
+    match ready_preview(s, g) {
         Some(img) if img.error().is_none() => {
-            let [w, h] = img.size().unwrap_or([1, 1]);
-            let size = cx.layout_size("artifact-stage").unwrap_or([800.0, 600.0]);
-            Stage::new(
-                |s: &mut State| &mut s.stage,
-                [w as f32, h as f32],
-                el().key("preview-image").role("img").label(crate::gallery::title(g)).pixels(img.pixels()),
-            )
-            .icons(&icons::ZOOM_IN, &icons::ZOOM_OUT, &icons::FIT)
-            .labels("Zoom in", "Zoom out", "Fit", "Zoom controls")
-            .build(&s.stage, k, size)
+            stage::stage(&s.zoom, el().key("preview-image").role("img").label(crate::gallery::title(g)).pixels(img.pixels()), k)
         }
         Some(img) => placeholder(g, k, text(format!("Couldn't show the image: {:?}", img.error())).font(k.ty.ui).color(k.c.danger.fg).wrap()),
         None => {
@@ -282,11 +239,214 @@ fn image(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
     }
 }
 
-fn generation(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
+/// The selected picture, decoded, once it is.
+fn ready_preview<'a>(s: &'a State, g: &Gen) -> Option<&'a rune::Image> {
+    s.preview.as_ref().filter(|(id, _)| *id == g.id).map(|(_, img)| img).filter(|img| img.is_ready())
+}
+
+fn generation(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
+    let picture = ready_preview(s, g).filter(|img| img.error().is_none()).and_then(rune::Image::size);
+    if let Some([w, h]) = picture {
+        s.zoom.measure([w as f32, h as f32], cx.layout_size(stage::KEY).unwrap_or([800.0, 600.0]));
+    }
     let canvas = match &g.phase {
-        Phase::Done { .. } => image(s, g, k, cx),
+        Phase::Done { .. } => image(s, g, k),
         Phase::Failed(why) => failed(s, g, why, k),
         _ => progress(s, g, k),
     };
-    col().key("generation").w_full().grow(1.0).min_h(0.0).child(canvas).child(footer(s, g, k))
+    col().key("generation").w_full().grow(1.0).min_h(0.0).child(bar(s, g, picture.is_some(), k, layer)).child(canvas)
+}
+
+type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
+
+fn tool(icon: &'static rune::Icon, key: &str, label: &str, disabled: bool, k: &Kit, f: Action) -> El {
+    IconButton::new(icon)
+        .variant(IconButtonVariant::GhostMuted)
+        .label(label)
+        .help(label)
+        .disabled(disabled)
+        .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| f(s, tx))
+        .build(k)
+        .key(key.to_owned())
+}
+
+/// What can be done with the selected generation.
+fn actions(s: &State, g: &Gen, k: &Kit) -> El {
+    let done = g.file().is_some();
+    let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
+    let known = g.request.is_some();
+    let id = g.id.clone();
+    let mut actions = row().key("picture-actions").role("group").label("Picture").gap(2.0).center_y();
+    let i = id.clone();
+    actions = actions.child(tool(&icons::SAVE, "save", "Save PNG…", !done, k, Box::new(move |s, tx| s.save(&i, tx))));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let i = id.clone();
+        actions = actions.child(tool(&icons::REVEAL, "reveal", "Reveal in Finder", !done, k, Box::new(move |s, _| s.reveal(&i))));
+    }
+    let i = id.clone();
+    actions = actions.child(tool(&icons::PICTURE, "edit-picture", "Edit this picture", !done, k, Box::new(move |s, _| s.edit_picture(&i))));
+    let prompt = g.prompt().to_owned();
+    actions = actions.child(tool(&icons::COPY, "copy-prompt", "Copy prompt", !known, k, Box::new(move |_, tx| tx.copy(prompt.clone()))));
+    let seed = g.seed().map(|s| s.to_string()).unwrap_or_default();
+    actions = actions.child(tool(&icons::HASH, "copy-seed", "Copy seed", !known, k, Box::new(move |_, tx| tx.copy(seed.clone()))));
+    let i = id.clone();
+    actions = actions.child(tool(&icons::RERUN, "rerun", "Re-run with a new seed", !s.connected() || !known, k, Box::new(move |s, _| s.rerun(&i))));
+    actions.child(tool(&icons::TRASH, "delete", "Delete", running, k, Box::new(move |s, _| s.delete(&id))))
+}
+
+/// Zoom out, the level (which shows the picture at 100%), zoom in and fit.
+fn zoom(s: &State, shown: bool, k: &Kit) -> El {
+    let z = &s.zoom;
+    let level = if shown { format!("{}%", z.level()) } else { "–".to_owned() };
+    let tnum = k.ty.small.features("'tnum' 1");
+    let actual = Button::new("Actual size")
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .help("Actual size (100%)")
+        .disabled(!shown || z.is_actual())
+        .label_with(move |_, ink| text(level).font(tnum).color(ink))
+        .on_press_tx(|s: &mut State, tx| s.zoom.actual(tx))
+        .build(k)
+        .key("zoom-level")
+        .min_w(52.0);
+    row()
+        .key("zoom-controls")
+        .role("group")
+        .label("Zoom")
+        .gap(2.0)
+        .center_y()
+        .child(tool(&icons::ZOOM_OUT, "zoom-out", "Zoom out", !shown || !z.can_zoom_out(), k, Box::new(|s, tx| s.zoom.zoom_by(1.0 / stage::STEP, tx))))
+        .child(actual)
+        .child(tool(&icons::ZOOM_IN, "zoom-in", "Zoom in", !shown || !z.can_zoom_in(), k, Box::new(|s, tx| s.zoom.zoom_by(stage::STEP, tx))))
+        .child(tool(&icons::FIT, "zoom-fit", "Fit", !shown || z.is_fit(), k, Box::new(|s, tx| s.zoom.fit(tx))))
+}
+
+/// Size · seed · time, the time opening where it went.
+fn info(s: &State, g: &Gen, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
+    let decoded = ready_preview(s, g).and_then(rune::Image::size);
+    let mut facts = Vec::new();
+    if let Some((w, h)) = g.size().or(decoded.map(|[w, h]| (w, h))) {
+        facts.push(format!("{w} × {h} · {:.1} MP", megapixels(w, h)));
+    }
+    if let Some(seed) = g.seed() {
+        facts.push(format!("seed {seed}"));
+    }
+    match g.references().len() {
+        0 => {}
+        1 => facts.push("edits 1 picture".into()),
+        n => facts.push(format!("edits {n} pictures")),
+    }
+    let mut out = row().key("facts").gap(4.0).center_y().shrink().min_w(0.0);
+    if !facts.is_empty() {
+        out = out.child(text(facts.join(" · ")).key("facts-text").font(k.ty.small).color(c.text_muted).truncate().shrink().min_w(0.0));
+    }
+    if let Phase::Done { seconds, timings } = &g.phase {
+        let trigger = Button::new(format!("{seconds:.1} s"))
+            .variant(ButtonVariant::GhostMuted)
+            .control_size(ControlSize::Small)
+            .help("Where the time went")
+            .on_press(|s: &mut State| s.timing_open = !s.timing_open)
+            .build(k)
+            .key("took");
+        let popover = Popover::new("timing")
+            .trigger(trigger)
+            .title(format!("Took {seconds:.1} s"))
+            .placement(Placement::BottomEnd)
+            .open(s.timing_open)
+            .on_close(|s: &mut State| s.timing_open = false)
+            .child(timing(s, g, *seconds, timings.as_ref(), k))
+            .build(k, layer);
+        out = out.child(popover);
+    }
+    out
+}
+
+/// One stage of a generation, as the timing details list it.
+struct Part {
+    name: String,
+    seconds: f64,
+    ink: rune::Color,
+}
+
+/// Where the time went: the server's stage timings, or the studio's estimate of them when the
+/// server reports only the total.
+fn timing(s: &State, g: &Gen, total: f64, timings: Option<&Timings>, k: &Kit) -> El {
+    let c = &k.c;
+    let part = |name: String, seconds: f64, ink| Part { name, seconds, ink };
+    let (parts, note) = if let Some(t) = timings {
+        let mut parts = Vec::new();
+        if let Some(v) = t.load {
+            parts.push(part("Loading models".into(), v, c.border_strong));
+        }
+        if let Some(v) = t.encode {
+            parts.push(part("Reading the prompt".into(), v, c.icon_faint));
+        }
+        if !t.steps.is_empty() {
+            let sum: f64 = t.steps.iter().sum();
+            parts.push(part(format!("{} steps, {:.1} s each", t.steps.len(), sum / t.steps.len() as f64), sum, c.icon_accent));
+        }
+        if let Some(v) = t.decode {
+            parts.push(part("Decoding".into(), v, c.icon_muted));
+        }
+        let rest = total - parts.iter().map(|p| p.seconds).sum::<f64>();
+        if rest > 0.05 {
+            parts.push(part("Everything else".into(), rest, c.border_base));
+        }
+        (parts, None)
+    } else {
+        let model = s.time_model();
+        let mp = g.size().map_or(0.0, |(w, h)| megapixels(w, h));
+        let scale = total / model.warm(mp).max(f64::EPSILON);
+        let parts = vec![
+            part(format!("{} steps, ≈ {:.1} s each", crate::api::IMAGE_STEPS, model.step_at(mp) * scale), model.steps_at(mp) * scale, c.icon_accent),
+            part("Decoding".into(), model.decode_at(mp) * scale, c.icon_muted),
+            part("Everything else".into(), model.fixed * scale, c.border_base),
+        ];
+        (parts, Some("The server reports only the total, so this splits it as the studio's estimate does."))
+    };
+    let mut bar = row().key("timing-bar").w_full().h(8.0).gap(2.0).a11y_hidden();
+    for p in &parts {
+        bar = bar.child(el().h_full().grow(p.seconds.max(0.0) as f32).radius(2.0).fill(p.ink));
+    }
+    let mut rows = col().key("timing-rows").w_full().gap(6.0);
+    for p in &parts {
+        let value = if timings.is_some() { format!("{:.1} s", p.seconds) } else { format!("≈ {:.1} s", p.seconds) };
+        rows = rows.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(el().size(8.0, 8.0).radius(2.0).fill(p.ink).a11y_hidden())
+                .child(text(p.name.clone()).font(k.ty.small).color(c.text_muted).grow(1.0).shrink().min_w(0.0).truncate())
+                .child(text(value).font(k.ty.small.features("'tnum' 1")).color(c.text_base)),
+        );
+    }
+    let mut out = col().key("timing").w_full().gap(10.0).child(bar).child(rows);
+    if let Some(n) = note {
+        out = out.child(text(n).key("timing-note").font(k.ty.small).color(c.text_faint).wrap());
+    }
+    out
+}
+
+/// The row under the title: what can be done with the picture, its zoom, and what it is.
+fn bar(s: &State, g: &Gen, shown: bool, k: &Kit, layer: &mut Vec<El>) -> El {
+    let divider = || el().size(1.0, 16.0).mx(4.0).fill(k.c.border_base).a11y_hidden();
+    row()
+        .key("picture-bar")
+        .role("toolbar")
+        .label("Picture")
+        .w_full()
+        .px(10.0)
+        .py(4.0)
+        .gaps(4.0, 2.0)
+        .center_y()
+        .flex_wrap()
+        .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
+        .child(actions(s, g, k))
+        .child(divider())
+        .child(zoom(s, shown, k))
+        .child(el().grow(1.0).a11y_hidden())
+        .child(info(s, g, k, layer))
 }

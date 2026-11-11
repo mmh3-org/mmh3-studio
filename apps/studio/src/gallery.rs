@@ -74,7 +74,7 @@ fn status_line(g: &Gen, clock: f64, k: &Kit) -> (String, rune::Color) {
         Phase::Sending => ("Sending…".into(), c.text_faint),
         Phase::Queued => ("Queued".into(), c.text_faint),
         Phase::Running { step, steps, since } => (format!("{} · {}", stage(g, *step, *steps).0, elapsed(*since, clock)), c.text_muted),
-        Phase::Done { seconds } => match g.size() {
+        Phase::Done { seconds, .. } => match g.size() {
             Some((w, h)) => (format!("{w}×{h} · {seconds:.1} s"), c.text_faint),
             None => (format!("{seconds:.1} s"), c.text_faint),
         },

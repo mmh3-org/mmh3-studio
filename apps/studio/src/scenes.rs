@@ -2,10 +2,11 @@
 
 use std::path::PathBuf;
 
-use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status};
+use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status, Timings};
 use crate::mock::paint;
 use crate::power::{Chip, Mode, Power, Source};
 
+use crate::sizes::Quality;
 use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
 type Scene = (&'static str, fn(&mut State));
@@ -19,6 +20,7 @@ pub const SCENES: &[Scene] = &[
     ("custom-size", custom_size),
     ("offline-selected", offline_selected),
     ("confirm-delete", confirm_delete),
+    ("timing", timing),
     ("references", references),
     ("power", power),
 ];
@@ -49,7 +51,7 @@ pub fn disconnected(s: &mut State) {
 }
 
 fn remote(id: &str, state: Remote) -> Generation {
-    Generation { error: None, id: id.into(), queued: 1_762_849_000, seconds: None, state, step: None, steps: None }
+    Generation { error: None, id: id.into(), queued: 1_762_849_000, seconds: None, state, step: None, steps: None, timings: None }
 }
 
 /// What the studio remembers asking for `id`, which the server never repeats.
@@ -87,7 +89,10 @@ fn library(s: &mut State) {
     offline(s);
     let list = vec![
         done(s, "7c01aa2e0004", "Paper boats drifting across a rain puddle on cobblestones, reflections of neon signs", 912, (4736, 3552), 236.4),
-        done(s, "7c01aa2e0003", "A lighthouse on a basalt cliff at dusk, long exposure, sea mist", 4127, (5472, 3072), 241.8),
+        Generation {
+            timings: Some(Timings { load: None, encode: Some(1.6), steps: vec![37.4, 37.9, 38.0, 37.8, 38.1, 38.2], decode: Some(5.8) }),
+            ..done(s, "7c01aa2e0003", "A lighthouse on a basalt cliff at dusk, long exposure, sea mist", 4127, (5472, 3072), 241.8)
+        },
         done(s, "7c01aa2e0002", "Isometric illustration of a tiny greenhouse full of succulents", 77, (2048, 2048), 38.7),
         done(s, "7c01aa2e0001", "Portrait of a red fox in fresh snow, shallow depth of field", 31_337, (3072, 5472), 239.1),
     ];
@@ -112,7 +117,7 @@ pub fn running(s: &mut State) {
     gens.append(&mut s.gens);
     s.gens = gens;
     s.prompt.replace_text("A cathedral made of glass in a pine forest, morning fog, volumetric light");
-    s.size = SizeChoice::Preset(1);
+    s.size = SizeChoice { quality: Quality::Final, aspect: 0 };
     s.selected = Some("7c01aa2e0005".into());
 }
 
@@ -140,7 +145,7 @@ pub fn failed(s: &mut State) {
 pub fn custom_size(s: &mut State) {
     empty(s);
     s.prompt.replace_text("Wide panorama of the Dolomites at sunrise");
-    s.size = SizeChoice::Custom;
+    s.custom_size = true;
     s.custom_w.replace_text("6000");
     s.custom_h.replace_text("2000");
 }
@@ -153,6 +158,12 @@ pub fn offline_selected(s: &mut State) {
 pub fn confirm_delete(s: &mut State) {
     gallery(s);
     s.delete("7c01aa2e0003");
+}
+
+/// Where the selected picture's time went, as the server timed it.
+pub fn timing(s: &mut State) {
+    gallery(s);
+    s.timing_open = true;
 }
 
 /// The composer with pictures attached to edit, their thumbnails painted in place.

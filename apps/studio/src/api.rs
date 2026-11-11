@@ -43,6 +43,25 @@ pub struct Generation {
     pub state: State,
     pub step: Option<u32>,
     pub steps: Option<u32>,
+    /// Where a finished generation's time went. Servers that do not report it leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<Timings>,
+}
+
+/// A finished generation's stages, in seconds. Each is left out when the server did not time it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Timings {
+    /// Loading models that were not resident.
+    #[serde(default)]
+    pub load: Option<f64>,
+    /// Reading the prompt and any pictures.
+    #[serde(default)]
+    pub encode: Option<f64>,
+    /// Each denoising step, in order.
+    #[serde(default)]
+    pub steps: Vec<f64>,
+    #[serde(default)]
+    pub decode: Option<f64>,
 }
 
 impl Generation {

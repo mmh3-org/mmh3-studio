@@ -26,7 +26,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let k = kit(dark);
     let mut layer = Vec::new();
     let [top, right, bottom, left] = cx.safe_area();
-    let panes = if is_compact(s) { compact(s, k, cx, dark) } else { split(s, k, cx, dark) };
+    let panes = if is_compact(s) { compact(s, k, cx, dark, &mut layer) } else { split(s, k, cx, dark, &mut layer) };
     let panes = menu(s, k, panes, &mut layer);
     confirm_delete(s, k, &mut layer);
     if !s.notes.is_empty() {
@@ -48,8 +48,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     rune_kit::root(body, layer)
 }
 
-/// One pane at a time under a switcher, with the picture's actions above the picture.
-fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
+/// One pane at a time under a switcher, with the picture's title above the picture.
+fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool, layer: &mut Vec<El>) -> El {
     let labels = Pane::ALL.map(Pane::label);
     let at = Pane::ALL.iter().position(|p| *p == s.pane);
     let picker = SegmentedControl::new(&labels, at).label("Show").width(None).on_pick(|s: &mut State, i, _| s.pane = Pane::ALL[i]).build(k).key("pane-picker");
@@ -58,15 +58,15 @@ fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
         Pane::Gallery => col().key("compact-gallery").w_full().h_full().min_h(0.0).px(10.0).child(gallery::sidebar(s, k, dark)),
         Pane::Picture => {
             head = head.child(toolbar(s, k, true).build(k));
-            preview::main(s, k, cx)
+            preview::main(s, k, cx, layer)
         }
         Pane::Compose => composer::composer(s, k),
     };
     col().key("compact").w_full().h_full().child(head).child(col().key(format!("compact-{:?}", s.pane)).w_full().grow(1.0).min_h(0.0).child(body))
 }
 
-fn split(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
-    let main = preview::main(s, k, cx);
+fn split(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool, layer: &mut Vec<El>) -> El {
+    let main = preview::main(s, k, cx, layer);
     SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, gallery::sidebar(s, k, dark))
         .inspector(&s.inspector, |s: &mut State| &mut s.inspector, composer::composer(s, k))
@@ -81,59 +81,26 @@ fn split(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
         .build(k)
 }
 
-type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
-
+/// The title; the picture's own controls are on the row under it, in the preview pane.
 fn toolbar(s: &State, k: &Kit, compact: bool) -> Toolbar {
     let title = s.selected_gen().map_or_else(|| "mmh3 studio".to_owned(), |g| gallery::title(g).lines().next().unwrap_or_default().to_owned());
-    let mut actions = row().key("toolbar-actions").gap(2.0).center_y();
-    if let Some(g) = s.selected_gen() {
-        let done = g.file().is_some();
-        let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
-        let id = g.id.clone();
-        let act = |icon: &'static rune::Icon, key: &str, label: &str, disabled: bool, f: Action| {
-            IconButton::new(icon)
-                .variant(IconButtonVariant::GhostMuted)
-                .control_size(ControlSize::Large)
-                .label(label)
-                .help(label)
-                .disabled(disabled)
-                .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| f(s, tx))
-                .build(k)
-                .key(key.to_owned())
-        };
-        let i = id.clone();
-        actions = actions.child(act(&icons::SAVE, "save", "Save PNG…", !done, Box::new(move |s, tx| s.save(&i, tx))));
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let i = id.clone();
-            actions = actions.child(act(&icons::REVEAL, "reveal", "Reveal in Finder", !done, Box::new(move |s, _| s.reveal(&i))));
-        }
-        let i = id.clone();
-        actions = actions.child(act(&icons::PICTURE, "edit-picture", "Edit this picture", !done, Box::new(move |s, _| s.edit_picture(&i))));
-        let known = g.request.is_some();
-        let prompt = g.prompt().to_owned();
-        actions = actions.child(act(&icons::COPY, "copy-prompt", "Copy prompt", !known, Box::new(move |_, tx| tx.copy(prompt.clone()))));
-        let seed = g.seed().map(|s| s.to_string()).unwrap_or_default();
-        actions = actions.child(act(&icons::HASH, "copy-seed", "Copy seed", !known, Box::new(move |_, tx| tx.copy(seed.clone()))));
-        let i = id.clone();
-        actions = actions.child(act(&icons::RERUN, "rerun", "Re-run with a new seed", !s.connected() || !known, Box::new(move |s, _| s.rerun(&i))));
-        let i = id.clone();
-        actions = actions.child(act(&icons::TRASH, "delete", "Delete", running, Box::new(move |s, _| s.delete(&i))));
-    }
+    let toolbar = Toolbar::new().leading(title_text(title, k));
     if compact {
-        return Toolbar::new().leading(title_text(title, k)).trailing(actions);
+        return toolbar;
     }
-    actions = actions.child(
+    let label = if s.inspector.is_open() { "Hide composer" } else { "Show composer" };
+    toolbar.trailing(
         IconButton::new(&shell::INSPECTOR)
             .variant(IconButtonVariant::GhostMuted)
             .control_size(ControlSize::Large)
             .expanded(s.inspector.is_open())
-            .label(if s.inspector.is_open() { "Hide composer" } else { "Show composer" })
+            .label(label)
+            .help(label)
+            .shortcut("⌥⌘I")
             .on_press(|s: &mut State| s.inspector.toggle())
             .build(k)
             .key("inspector-toggle"),
-    );
-    Toolbar::new().leading(title_text(title, k)).trailing(actions)
+    )
 }
 
 fn title_text(title: String, k: &Kit) -> El {
