@@ -5,7 +5,7 @@
 //! request. A video is there only so that a client meets one: it takes its steps and writes
 //! nothing worth watching.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -13,10 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::{Generation, Generations, IMAGE_STEPS, MAX_REFERENCES, Memory, Refusal, State, Status};
 
-/// What the server keeps after a picture: its text encoder, and its transformer and picture
-/// decoder in the tables of the video ones.
-const KEPT: [&str; 3] = ["text_encoder", "video_vae", "dit"];
-const KEPT_AFTER_VIDEO: [&str; 4] = ["text_encoder", "video_vae", "audio_vae", "dit"];
+/// The slots of the server's shared model table, in the order `/v1/status` lists them. A
+/// picture keeps its decoder in the video VAE's slot.
+const SLOTS: [&str; 5] = ["text_encoder", "video_vae", "audio_vae", "latent_upscaler", "dit"];
+/// What a video leaves in the table.
+const VIDEO_MODELS: [&str; 4] = ["text_encoder", "video_vae", "audio_vae", "dit"];
 const IMAGE_OPTIONS: [&str; 8] = ["prompt", "prompt-file", "reference", "width", "height", "min-generation-area", "seed", "attention-precision"];
 const IMAGE_FILE_OPTIONS: [&str; 2] = ["prompt-file", "reference"];
 const MACHINE_OPTIONS: [&str; 10] = ["models", "dit", "text-encoder", "video-vae", "audio-vae", "devices", "vram-budget", "worker", "worker-units", "token"];
@@ -96,10 +97,12 @@ struct Jobs {
     list: Vec<Job>,
     waiting: VecDeque<String>,
     count: u64,
-    /// What `/v1/status` says is held. A picture takes each model out of its table while it uses
-    /// it, so the list shrinks as it runs and is `null` while it decodes; a video lends every
-    /// model to its worker, so it is `null` throughout.
-    held: Option<Vec<&'static str>>,
+    /// The shared table `/v1/status` lists. A picture adds what it loads to it and takes the
+    /// transformer out while it steps, leaving the rest as it found it.
+    table: HashSet<&'static str>,
+    /// The table is busy, so `/v1/status` says `null`: while a picture decodes, and throughout
+    /// a video, which lends every model to its worker.
+    lent: bool,
 }
 
 struct Shared {
@@ -115,8 +118,16 @@ impl Shared {
         self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn hold(&self, models: Option<Vec<&'static str>>) {
-        self.lock().held = models;
+    fn keep(&self, models: &[&'static str]) {
+        self.lock().table.extend(models);
+    }
+
+    fn take(&self, model: &str) {
+        self.lock().table.remove(model);
+    }
+
+    fn lend(&self, lent: bool) {
+        self.lock().lent = lent;
     }
 
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
@@ -136,7 +147,7 @@ pub fn spawn(addr: &str, config: Config) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let jobs = Jobs { held: Some(Vec::new()), ..Jobs::default() };
+    let jobs = Jobs::default();
     let shared = Arc::new(Shared { jobs: Mutex::new(jobs), queued: Condvar::new(), changed: Condvar::new(), config, started });
     let worker = shared.clone();
     std::thread::Builder::new().name("mock-worker".into()).spawn(move || work(&worker))?;
@@ -170,7 +181,7 @@ fn work(shared: &Shared) {
             Output::Picture => picture(shared, &id, &fields),
             Output::Video => video(shared, &id, &fields),
         };
-        shared.hold(Some(if output == Output::Picture { KEPT.to_vec() } else { KEPT_AFTER_VIDEO.to_vec() }));
+        shared.lend(false);
         shared.update(&id, |j| {
             j.seconds = Some(started.elapsed().as_secs_f64());
             match ended {
@@ -235,12 +246,15 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Strin
         return Err(format!("pass at most {MAX_REFERENCES} --reference pictures"));
     }
     std::thread::sleep(shared.config.text);
-    shared.hold(Some(vec!["text_encoder", "video_vae"]));
+    shared.keep(&["text_encoder"]);
+    shared.take("dit");
     steps(shared, id, IMAGE_STEPS);
+    shared.keep(&["dit"]);
     if prompt.contains("[fail]") {
         return Err("The mock server was asked to fail.".into());
     }
-    shared.hold(None);
+    shared.lend(true);
+    shared.keep(&["video_vae"]);
     let t = Instant::now();
     let png = paint(width as u32, height as u32, seed);
     std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
@@ -249,7 +263,8 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Strin
 
 fn video(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
     let n = number(fields, "steps", 8)? as u32;
-    shared.hold(None);
+    shared.lend(true);
+    shared.keep(&VIDEO_MODELS);
     std::thread::sleep(shared.config.text);
     steps(shared, id, n);
     std::thread::sleep(shared.config.decode);
@@ -422,12 +437,12 @@ fn status(shared: &Shared) -> Status {
     let jobs = shared.lock();
     let running = jobs.list.iter().find(|j| j.state == State::Running);
     let busy = running.is_some();
-    let held = jobs.held.clone();
+    let held = (!jobs.lent).then(|| SLOTS.iter().filter(|m| jobs.table.contains(*m)).map(|m| (*m).to_owned()).collect());
     Status {
         generating: running.map(|j| j.id.clone()),
         generations: jobs.list.len() as u32,
         memory: Some(Memory { free: TOTAL_MEMORY - (38 << 30) - if busy { 21 << 30 } else { 0 }, total: TOTAL_MEMORY }),
-        models: held.map(|m| m.iter().map(|m| (*m).to_owned()).collect()),
+        models: held,
         queued: jobs.list.iter().filter(|j| j.state == State::Queued).count() as u32,
     }
 }

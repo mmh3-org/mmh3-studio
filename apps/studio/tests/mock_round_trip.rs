@@ -37,7 +37,8 @@ fn a_picture_streams_from_the_queue_through_six_steps_then_serves_its_png() {
     let png = client.image(&created.id).unwrap();
     let img = image::load_from_memory(&png).unwrap();
     assert_eq!((img.width(), img.height()), (320, 256));
-    assert_eq!(client.status().unwrap().models.map(|m| m.len()), Some(3));
+    let kept = ["text_encoder", "video_vae", "dit"].map(str::to_owned);
+    assert_eq!(client.status().unwrap().models.as_deref(), Some(&kept[..]), "the picture's decoder sits in the video VAE's slot");
 
     assert_eq!(client.list().unwrap().len(), 1);
     client.delete(&created.id).unwrap();
@@ -123,7 +124,7 @@ fn queued_generations_wait_their_turn_and_list_most_recent_first() {
     let status = client.status().unwrap();
     assert_eq!(status.generating.as_deref(), Some(a.id.as_str()));
     assert_eq!(status.queued, 1);
-    assert_eq!(status.models.as_deref(), Some(&["text_encoder".to_owned(), "video_vae".to_owned()][..]), "a picture's steps hold no DiT in the table");
+    assert_eq!(status.models.as_deref(), Some(&["text_encoder".to_owned()][..]), "a first picture's steps hold no DiT and no decoder yet");
     let list = client.list().unwrap();
     assert_eq!(list[0].id, b.id, "most recent first");
     let mut first = None;
@@ -170,4 +171,13 @@ fn a_video_has_no_picture() {
     assert_eq!(client.status().unwrap().models, None, "a video lends every model to its worker");
     assert_eq!(watch(&client, &g.id).last().map(|g| g.state), Some(State::Done));
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 404, .. })));
+
+    let after_video = client.status().unwrap().models;
+    let refused = client.create_image(&ImageRequest { width: 16, ..request("too narrow", 1) }).unwrap();
+    assert_eq!(watch(&client, &refused.id).last().map(|g| g.state), Some(State::Failed));
+    assert_eq!(client.status().unwrap().models, after_video, "a picture refused before it loads anything leaves the table be");
+    let picture = client.create_image(&request("a fox", 1)).unwrap();
+    assert_eq!(watch(&client, &picture.id).last().map(|g| g.state), Some(State::Done));
+    let kept = ["text_encoder", "video_vae", "audio_vae", "dit"].map(str::to_owned);
+    assert_eq!(client.status().unwrap().models.as_deref(), Some(&kept[..]), "a picture leaves the video's audio VAE where it was");
 }
