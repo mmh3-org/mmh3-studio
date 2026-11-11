@@ -171,16 +171,17 @@ impl Net {
         let _ = self.remember.send(requests);
     }
 
-    /// Polls the server's status every two seconds, landing it only when it changes; a change
-    /// in the number of generations, or a change in whether the server answers, refreshes the
-    /// list.
+    /// Polls the server's status every two seconds, landing it only when it changes, and
+    /// refreshes the list when [`refresh_list`] says to.
     pub fn start(&self) {
         let (h, c, p) = (self.handle.clone(), self.client.clone(), self.pictures.clone());
         let _ = rune::task::spawn("mmh3-status", move || {
             let mut last: Option<Result<Status, Error>> = None;
+            let mut polls_since_list = 0;
             loop {
                 let now = c.status();
-                let refresh = refresh_list(last.as_ref(), &now);
+                let refresh = refresh_list(last.as_ref(), &now, polls_since_list);
+                polls_since_list += 1;
                 if last.as_ref() != Some(&now) {
                     let status = now.clone();
                     h.update(move |s, tx| {
@@ -189,6 +190,7 @@ impl Net {
                     });
                 }
                 if refresh && let Ok(list) = c.list() {
+                    polls_since_list = 0;
                     p.prune(&list.iter().map(|g| g.id.clone()).collect());
                     h.update(move |s, tx| {
                         tx.instant();

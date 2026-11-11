@@ -28,6 +28,7 @@ pub use web::{Net, ask_for_references, save, server};
 pub type Requests = HashMap<String, ImageRequest>;
 
 const STATUS_EVERY: Duration = Duration::from_secs(2);
+const LIST_EVERY: u32 = 15;
 const WATCH_RETRY: Duration = Duration::from_millis(500);
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(5);
 
@@ -75,11 +76,15 @@ impl Queue {
     }
 }
 
-/// Whether a status poll should refresh the list: when the number of generations changes, or
-/// whether the server answers does.
-fn refresh_list(last: Option<&Result<Status, Error>>, now: &Result<Status, Error>) -> bool {
+/// Whether a status poll should refresh the list: when what the server is working through
+/// changes, when whether it answers does, or when the list has gone [`LIST_EVERY`] polls
+/// unrefreshed. The count alone misses a delete and a create elsewhere between two polls, and a
+/// generation that fails at once changes neither what runs nor what waits; the last rule catches
+/// what the others miss.
+fn refresh_list(last: Option<&Result<Status, Error>>, now: &Result<Status, Error>, polls_since_list: u32) -> bool {
+    let work = |s: &Status| (s.generations, s.generating.clone(), s.queued);
     match (last, now) {
-        (Some(Ok(a)), Ok(b)) => a.generations != b.generations,
+        (Some(Ok(a)), Ok(b)) => work(a) != work(b) || polls_since_list >= LIST_EVERY,
         (_, Err(e)) if e.is_unreachable() => false,
         (Some(was), _) => was != now,
         (None, _) => true,
@@ -120,5 +125,28 @@ fn picture_kind<T>(answer: &Result<T, Error>) -> ControlFlow<Probe> {
         Ok(_) | Err(Error::Refused { status: 409, .. }) => ControlFlow::Continue(()),
         Err(Error::Refused { status: 404, .. }) => ControlFlow::Break(Probe::NotAPicture),
         Err(_) => ControlFlow::Break(Probe::Unanswered),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(generations: u32, generating: Option<&str>, queued: u32) -> Status {
+        Status { generations, generating: generating.map(str::to_owned), queued, ..Status::default() }
+    }
+
+    #[test]
+    fn the_list_is_refreshed_when_the_work_changes_even_if_the_count_does_not() {
+        let idle = Ok(status(3, None, 0));
+        assert!(!refresh_list(Some(&idle), &Ok(status(3, None, 0)), 1));
+        assert!(refresh_list(Some(&idle), &Ok(status(3, Some("g4"), 0)), 1), "a delete and a create elsewhere");
+        assert!(refresh_list(Some(&idle), &Ok(status(3, None, 1)), 1));
+        assert!(refresh_list(Some(&idle), &Ok(status(4, None, 0)), 1));
+        assert!(refresh_list(Some(&idle), &Ok(status(3, None, 0)), LIST_EVERY), "a quiet list is refreshed now and then");
+        let mut busy = status(3, Some("g4"), 0);
+        busy.memory = Some(crate::api::Memory { free: 1, total: 2 });
+        assert!(!refresh_list(Some(&Ok(status(3, Some("g4"), 0))), &Ok(busy), 1), "memory moving is no reason");
+        assert!(refresh_list(None, &idle, 0));
     }
 }

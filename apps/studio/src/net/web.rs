@@ -107,9 +107,11 @@ impl Net {
         let inner = self.inner.clone();
         spawn_local(async move {
             let mut last: Option<Result<Status, Error>> = None;
+            let mut polls_since_list = 0;
             loop {
                 let now = inner.json::<Status>("v1/status").await;
-                let refresh = refresh_list(last.as_ref(), &now);
+                let refresh = refresh_list(last.as_ref(), &now, polls_since_list);
+                polls_since_list += 1;
                 if last.as_ref() != Some(&now) {
                     let status = now.clone();
                     inner.handle.update(move |s, tx| {
@@ -118,6 +120,7 @@ impl Net {
                     });
                 }
                 if refresh && let Ok(list) = inner.json::<Generations>("v1/generations").await {
+                    polls_since_list = 0;
                     inner.handle.update(move |s, tx| {
                         tx.instant();
                         let now = tx.clock();
