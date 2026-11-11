@@ -25,6 +25,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let dark = cx.system_dark();
     let k = kit(dark);
     let mut layer = Vec::new();
+    let [top, right, bottom, left] = cx.safe_area();
     let panes = if is_compact(s) { compact(s, k, cx, dark) } else { split(s, k, cx, dark) };
     let panes = menu(s, k, panes, &mut layer);
     confirm_delete(s, k, &mut layer);
@@ -36,6 +37,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .w_full()
         .h_full()
         .fill(k.c.page)
+        .pt(top)
+        .pr(right)
+        .pb(bottom)
+        .pl(left)
         .on_layout(|s: &mut State, r: [f32; 4]| s.width = r[2])
         .child(col().key("split").w_full().grow(1.0).min_h(0.0).child(panes))
         .children(power_banner(s, k))
@@ -45,11 +50,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 /// One pane at a time under a switcher, with the picture's actions above the picture.
 fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
-    let [top, right, _, left] = cx.safe_area();
     let labels = Pane::ALL.map(Pane::label);
     let at = Pane::ALL.iter().position(|p| *p == s.pane);
     let picker = SegmentedControl::new(&labels, at).label("Show").width(None).on_pick(|s: &mut State, i, _| s.pane = Pane::ALL[i]).build(k).key("pane-picker");
-    let mut head = col().key("compact-head").w_full().padding(8.0).pt(8.0 + top).gap(4.0).child(picker);
+    let mut head = col().key("compact-head").w_full().padding(8.0).gap(4.0).child(picker);
     let body = match s.pane {
         Pane::Gallery => col().key("compact-gallery").w_full().h_full().min_h(0.0).px(10.0).child(gallery::sidebar(s, k, dark)),
         Pane::Picture => {
@@ -58,14 +62,7 @@ fn compact(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
         }
         Pane::Compose => composer::composer(s, k),
     };
-    col()
-        .key("compact")
-        .w_full()
-        .h_full()
-        .pl(left)
-        .pr(right)
-        .child(head)
-        .child(col().key(format!("compact-{:?}", s.pane)).w_full().grow(1.0).min_h(0.0).child(body))
+    col().key("compact").w_full().h_full().child(head).child(col().key(format!("compact-{:?}", s.pane)).w_full().grow(1.0).min_h(0.0).child(body))
 }
 
 fn split(s: &State, k: &Kit, cx: &mut Cx<State>, dark: bool) -> El {
