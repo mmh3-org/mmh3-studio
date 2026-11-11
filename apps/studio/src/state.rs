@@ -47,7 +47,7 @@ impl Phase {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
     Watch,
     FetchImage,
@@ -316,7 +316,7 @@ impl State {
             self.gens.retain(|g| g.id != local);
         } else {
             let Some(g) = self.item_mut(local) else { return };
-            g.id = created.id.clone();
+            g.id.clone_from(&created.id);
             g.revision += 1;
             self.apply(&created, now);
         }
@@ -375,7 +375,7 @@ impl State {
     /// The server's list, most recent first: keeps what the app already holds for each, adds
     /// the new ones and drops what the server no longer has. Pictures are fetched for the rows
     /// that keep a thumbnail; older ones wait until they are selected.
-    pub fn merge(&mut self, list: Vec<Generation>, now: f64) {
+    pub fn merge(&mut self, list: &[Generation], now: f64) {
         let mut old: Vec<Gen> = std::mem::take(&mut self.gens);
         let mut gens: Vec<Gen> = Vec::new();
         let mut i = 0;

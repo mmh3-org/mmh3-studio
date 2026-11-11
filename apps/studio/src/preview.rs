@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use mmh3_studio::api::Timings;
 use mmh3_studio::sizes::megapixels;
 use rune::{Color, Cx, El, col, el, icon, row, text};
@@ -45,7 +47,7 @@ fn empty(s: &State, k: &Kit) -> El {
 pub fn start_command(s: &State) -> String {
     let mut cmd = String::from("export MMH3_MODELS=$PWD/models\ntarget/release/mmh3 server");
     if s.server != mmh3_studio::api::DEFAULT_SERVER {
-        cmd.push_str(&format!(" --listen {}", s.host()));
+        let _ = write!(cmd, " --listen {}", s.host());
     }
     cmd
 }

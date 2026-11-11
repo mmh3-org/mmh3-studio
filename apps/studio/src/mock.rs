@@ -47,7 +47,7 @@ struct Shared {
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Jobs> {
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner())
+        self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
@@ -90,7 +90,7 @@ fn work(shared: &Shared) {
                     g.steps = Some(IMAGE_STEPS);
                     break (g.id.clone(), g.prompt.clone().unwrap_or_default(), g.seed.unwrap_or(0), g.width.unwrap_or(256), g.height.unwrap_or(256));
                 }
-                jobs = shared.queued.wait(jobs).unwrap_or_else(|e| e.into_inner());
+                jobs = shared.queued.wait(jobs).unwrap_or_else(std::sync::PoisonError::into_inner);
             }
         };
         let started = Instant::now();
@@ -142,7 +142,7 @@ pub fn paint(width: u32, height: u32, seed: u64) -> Vec<u8> {
         let fy = y as f32;
         for (x, px) in line.as_chunks_mut::<3>().0.iter_mut().enumerate() {
             let fx = x as f32;
-            let t = (fx / w + fy / h) * 0.5;
+            let t = f32::midpoint(fx / w, fy / h);
             let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() / ring;
             let glow = (1.0 - (d.fract() - 0.5).abs() * 2.0).powi(6) * (1.0 - (d / 6.0).min(1.0)) * 0.35;
             for c in 0..3 {
@@ -192,7 +192,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Request> {
         if let Some((name, value)) = header.split_once(':') {
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => length = value.trim().parse().unwrap_or(0),
-                "content-type" => content_type = value.trim().to_owned(),
+                "content-type" => value.trim().clone_into(&mut content_type),
                 _ => {}
             }
         }

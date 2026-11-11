@@ -80,12 +80,11 @@ fn sizes(s: &State, k: &Kit) -> El {
                 .child(text("×").font(k.ty.ui).color(k.c.text_faint))
                 .child(field(&s.custom_h, "Height", "custom-height", |s| &mut s.custom_h)),
         );
-        let note = match &error {
-            Some(e) => text(e.to_string()).key("size-error").role("alert").font(k.ty.small).color(k.c.danger.fg).wrap(),
-            None => {
-                let (w, h) = s.chosen_size().unwrap_or_default();
-                text(format!("{:.1} MP", megapixels(w, h))).key("size-note").font(k.ty.small).color(k.c.text_faint)
-            }
+        let note = if let Some(e) = &error {
+            text(e.to_string()).key("size-error").role("alert").font(k.ty.small).color(k.c.danger.fg).wrap()
+        } else {
+            let (w, h) = s.chosen_size().unwrap_or_default();
+            text(format!("{:.1} MP", megapixels(w, h))).key("size-note").font(k.ty.small).color(k.c.text_faint)
         };
         out = out.child(note);
     }

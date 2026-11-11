@@ -40,6 +40,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     rune_kit::root(body, layer)
 }
 
+type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
+
 fn toolbar(s: &State, k: &Kit) -> Toolbar {
     let title = s.selected_gen().map_or_else(|| "mmh3 studio".to_owned(), |g| g.prompt.lines().next().unwrap_or_default().to_owned());
     let mut actions = row().key("toolbar-actions").gap(2.0).center_y();
@@ -47,7 +49,6 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
         let done = g.file().is_some();
         let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
         let id = g.id.clone();
-        type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
         let act = |icon: &'static rune::Icon, key: &str, label: &str, disabled: bool, f: Action| {
             IconButton::new(icon)
                 .variant(IconButtonVariant::GhostMuted)

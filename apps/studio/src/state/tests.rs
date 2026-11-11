@@ -91,10 +91,10 @@ fn merging_the_list_keeps_local_placeholders_and_drops_videos_and_vanished_items
     let mut s = online();
     s.prompt.replace_text("pending");
     s.generate();
-    s.merge(vec![running("b", 2), server("a", api::State::Done), Generation { kind: Kind::Video, ..server("v", api::State::Done) }], 3.0);
+    s.merge(&[running("b", 2), server("a", api::State::Done), Generation { kind: Kind::Video, ..server("v", api::State::Done) }], 3.0);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["local-1", "b", "a"]);
-    s.merge(vec![running("b", 3)], 4.0);
+    s.merge(&[running("b", 3)], 4.0);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["local-1", "b"]);
     assert_eq!(s.gens[1].phase, Phase::Running { step: 3, steps: 6, since: 3.0 });
@@ -103,7 +103,7 @@ fn merging_the_list_keeps_local_placeholders_and_drops_videos_and_vanished_items
 #[test]
 fn a_running_generation_is_not_deleted() {
     let mut s = State::offline();
-    s.merge(vec![running("b", 2), server("a", api::State::Done)], 0.0);
+    s.merge(&[running("b", 2), server("a", api::State::Done)], 0.0);
     s.delete("b");
     assert_eq!(s.gens.len(), 2);
     assert_eq!(s.notes.len(), 1);
@@ -113,7 +113,7 @@ fn a_running_generation_is_not_deleted() {
 #[test]
 fn deleting_asks_first_and_cancelling_keeps_the_generation() {
     let mut s = State::offline();
-    s.merge(vec![server("a", api::State::Done)], 0.0);
+    s.merge(&[server("a", api::State::Done)], 0.0);
     s.delete("a");
     assert_eq!(s.deleting.as_deref(), Some("a"));
     assert_eq!(s.gens.len(), 1, "nothing is deleted before it is confirmed");
@@ -146,7 +146,7 @@ fn generating_while_disconnected_adds_nothing_and_says_why() {
     s.generate();
     assert!(s.gens.is_empty());
     assert_eq!(s.notes.last().map(|n| n.title.as_str()), Some("Start mmh3 server first."));
-    s.merge(vec![server("a", api::State::Done)], 0.0);
+    s.merge(&[server("a", api::State::Done)], 0.0);
     s.rerun("a");
     assert_eq!(s.gens.len(), 1);
 }
@@ -157,7 +157,7 @@ fn a_list_that_lands_before_the_submit_answer_leaves_one_row() {
     s.prompt.replace_text("a fox");
     s.generate();
     let local = s.gens[0].id.clone();
-    s.merge(vec![running("srv1", 1)], 1.0);
+    s.merge(&[running("srv1", 1)], 1.0);
     assert_eq!(s.gens.len(), 2);
     s.submitted(&local, Ok(server("srv1", api::State::Queued)), 1.5);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();

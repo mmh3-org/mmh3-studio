@@ -24,9 +24,9 @@ fn a_generation_streams_six_steps_then_serves_its_png() {
     client.events(&created.id, |g| seen.push(g)).unwrap();
     let steps: Vec<u32> = seen.iter().filter_map(|g| g.step).collect();
     assert_eq!(steps, [1, 2, 3, 4, 5, 6]);
-    let last = seen.last().unwrap();
-    assert_eq!(last.state, State::Done);
-    assert_eq!(last.timings.as_ref().map(|t| t.steps.len()), Some(6));
+    let finished = seen.last().unwrap();
+    assert_eq!(finished.state, State::Done);
+    assert_eq!(finished.timings.as_ref().map(|t| t.steps.len()), Some(6));
 
     let png = client.image(&created.id).unwrap();
     let img = image::load_from_memory(&png).unwrap();
@@ -37,7 +37,7 @@ fn a_generation_streams_six_steps_then_serves_its_png() {
     assert_eq!(client.status().unwrap().models.map(|m| m.len()), Some(3));
 
     client.delete(&created.id).unwrap();
-    assert!(client.list().unwrap().is_empty());
+    assert_eq!(client.list().unwrap(), [] as [mmh3_studio::api::Generation; 0]);
 }
 
 #[test]

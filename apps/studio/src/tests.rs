@@ -101,7 +101,7 @@ fn gallery_thumbnails_are_decoded() {
     for g in &rt.state.gens {
         match &g.picture {
             state::Picture::Ready { thumb: Some(t), .. } => {
-                assert!(t.is_ready() && t.error().is_none() && t.size().is_some(), "{}: {:?} {:?}", g.id, t.size(), t.error())
+                assert!(t.is_ready() && t.error().is_none() && t.size().is_some(), "{}: {:?} {:?}", g.id, t.size(), t.error());
             }
             _ => panic!("{} has no thumbnail", g.id),
         }

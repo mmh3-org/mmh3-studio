@@ -14,3 +14,6 @@ serde.workspace = true
 serde_json.workspace = true
 image = { workspace = true, features = ["png"] }
 png.workspace = true
+
+[lints]
+workspace = true

@@ -47,7 +47,7 @@ struct Pictures {
 
 impl Pictures {
     fn lock(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+        self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn file(&self, id: &str) -> PathBuf {
@@ -164,7 +164,7 @@ impl Net {
                     h.update(move |s, tx| {
                         tx.instant();
                         let now = tx.clock();
-                        s.merge(list, now);
+                        s.merge(&list, now);
                     });
                 }
                 last = Some(now);
@@ -194,7 +194,7 @@ impl Net {
                 h.update(move |s, tx| {
                     let now = tx.clock();
                     s.apply(&g, now);
-                })
+                });
             };
             let mut wait = WATCH_RETRY;
             let lost = loop {

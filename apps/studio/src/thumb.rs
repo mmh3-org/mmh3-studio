@@ -14,7 +14,7 @@ pub fn fit(width: u32, height: u32, side: u32) -> (u32, u32) {
     if longest <= side {
         return (width.max(1), height.max(1));
     }
-    let scale = |v: u32| ((v as u64 * side as u64 + longest as u64 / 2) / longest as u64).max(1) as u32;
+    let scale = |v: u32| ((u64::from(v) * u64::from(side) + u64::from(longest) / 2) / u64::from(longest)).max(1) as u32;
     (scale(width), scale(height))
 }
 
@@ -34,12 +34,12 @@ pub fn thumbnail(png: &[u8]) -> Result<image::RgbaImage, String> {
         return whole(png);
     }
     let (tw, th) = fit(width, height, SIDE);
-    let column: Vec<usize> = (0..width as u64).map(|x| (x * tw as u64 / width as u64) as usize).collect();
+    let column: Vec<usize> = (0..u64::from(width)).map(|x| (x * u64::from(tw) / u64::from(width)) as usize).collect();
     let mut sums = vec![0u32; tw as usize * th as usize * 4];
     let mut counts = vec![0u32; tw as usize * th as usize];
     let mut y = 0u64;
     while let Some(row) = reader.next_row().map_err(|e| e.to_string())? {
-        let base = (y * th as u64 / height as u64) as usize * tw as usize;
+        let base = (y * u64::from(th) / u64::from(height)) as usize * tw as usize;
         for (x, px) in row.data().chunks_exact(channels).enumerate() {
             let rgba = match px {
                 [l] => [*l, *l, *l, 255],
@@ -50,7 +50,7 @@ pub fn thumbnail(png: &[u8]) -> Result<image::RgbaImage, String> {
             };
             let at = base + column[x];
             for (sum, v) in sums[at * 4..at * 4 + 4].iter_mut().zip(rgba) {
-                *sum += v as u32;
+                *sum += u32::from(v);
             }
             counts[at] += 1;
         }
@@ -85,7 +85,7 @@ mod tests {
         let full = whole(&png).unwrap();
         assert_eq!(rows.dimensions(), (256, 144));
         assert_eq!(rows.dimensions(), full.dimensions());
-        let diff: u64 = rows.as_raw().iter().zip(full.as_raw()).map(|(a, b)| a.abs_diff(*b) as u64).sum();
+        let diff: u64 = rows.as_raw().iter().zip(full.as_raw()).map(|(a, b)| u64::from(a.abs_diff(*b))).sum();
         let mean = diff as f64 / rows.as_raw().len() as f64;
         assert!(mean < 4.0, "mean difference {mean}");
     }

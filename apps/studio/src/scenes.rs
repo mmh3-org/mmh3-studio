@@ -95,7 +95,7 @@ fn library(s: &mut State) {
         done("7c01aa2e0002", "Isometric illustration of a tiny greenhouse full of succulents", 77, (2048, 2048)),
         done("7c01aa2e0001", "Portrait of a red fox in fresh snow, shallow depth of field", 31_337, (3072, 5472)),
     ];
-    s.merge(list, 0.0);
+    s.merge(&list, 0.0);
     for id in ["7c01aa2e0004", "7c01aa2e0003", "7c01aa2e0002", "7c01aa2e0001"] {
         picture(s, id, false);
     }
