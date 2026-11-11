@@ -186,6 +186,31 @@ fn a_list_fetched_before_a_submission_lands_after_it_without_dropping_it() {
 }
 
 #[test]
+fn only_a_few_generations_are_followed_at_once_the_running_one_first() {
+    let mut s = online();
+    let at = |id: &str, queued, state| Generation { queued, ..server(id, state) };
+    let mut list: Vec<Generation> = (1..=6).rev().map(|n| at(&format!("q{n}"), 10 + n, api::State::Queued)).collect();
+    list.push(at("r", 5, api::State::Running));
+    s.merge(&list, 0.0);
+    assert_eq!(s.gens.len(), 0, "not the studio's; probed first");
+    for g in &list {
+        s.elsewhere.insert(g.id.clone(), true);
+    }
+    s.merge(&list, 0.0);
+    let mut watching: Vec<&str> = s.watching.iter().map(String::as_str).collect();
+    watching.sort_unstable();
+    assert_eq!(watching, ["q1", "q2", "r"], "the running one, then the ones queued longest");
+    assert_eq!(s.to_watch, ["q3", "q4", "q5", "q6"]);
+
+    s.merge(&list[1..], 1.0);
+    s.watch_ended("r");
+    let mut watching: Vec<&str> = s.watching.iter().map(String::as_str).collect();
+    watching.sort_unstable();
+    assert_eq!(watching, ["q1", "q2", "q3"], "a free stream goes to the next in line, and a gone one is skipped");
+    assert!(!s.to_watch.contains(&"q6".to_owned()), "q6 left the list");
+}
+
+#[test]
 fn a_status_the_studio_cannot_read_still_counts_as_connected() {
     let mut s = State::offline();
     s.set_status(Err(api::Error::Malformed("missing field `queued`".into())));

@@ -16,6 +16,11 @@ use crate::net::Net;
 /// Thumbnails kept decoded, newest first; older rows show a placeholder.
 pub const MAX_THUMBS: usize = 240;
 pub const NOTE_SECONDS: f64 = 4.0;
+/// Generations followed through an event stream at once. Each stream holds a connection open
+/// until its generation ends, and a browser gives a page six to its server over HTTP/1.1, so
+/// the status poll, picture fetches and submissions keep the rest. The others wait their turn,
+/// and the list, refreshed as the queue moves, keeps their rows current meanwhile.
+pub const MAX_WATCHES: usize = 3;
 
 pub enum Conn {
     Connecting,
@@ -240,6 +245,8 @@ pub struct State {
     pub clock: f64,
     pub tick: u64,
     pub watching: HashSet<String>,
+    /// Generations to follow once a stream is free.
+    pub to_watch: Vec<String>,
     /// What the studio asked each of its generations for, by the server's id.
     pub requests: HashMap<String, ImageRequest>,
     /// Generations the server accepted from the studio that no list has shown yet. A list
@@ -307,6 +314,7 @@ impl State {
             clock: 0.0,
             tick: 0,
             watching: HashSet::new(),
+            to_watch: Vec::new(),
             unlisted: HashSet::new(),
             elsewhere: HashMap::new(),
             probing: HashSet::new(),
@@ -468,9 +476,31 @@ impl State {
     }
 
     pub fn watch(&mut self, id: &str) {
-        let Some(net) = &self.net else { return };
-        if self.watching.insert(id.to_owned()) {
-            net.watch(id.to_owned());
+        self.want_watch(id);
+        self.watch_next();
+    }
+
+    fn want_watch(&mut self, id: &str) {
+        if !self.watching.contains(id) && !self.to_watch.iter().any(|w| w == id) {
+            self.to_watch.push(id.to_owned());
+        }
+    }
+
+    /// Follows waiting generations while streams are free, those that will move first first:
+    /// the running one, then the one queued longest.
+    fn watch_next(&mut self) {
+        let gens = &self.gens;
+        self.to_watch.retain(|id| gens.iter().any(|g| g.id == *id && g.phase.is_active()));
+        self.to_watch.sort_by_key(|id| {
+            let g = gens.iter().find(|g| g.id == *id);
+            (!g.is_some_and(|g| matches!(g.phase, Phase::Running { .. })), g.and_then(|g| g.queued).unwrap_or(u64::MAX))
+        });
+        let free = MAX_WATCHES.saturating_sub(self.watching.len()).min(self.to_watch.len());
+        for id in self.to_watch.drain(..free) {
+            self.watching.insert(id.clone());
+            if let Some(net) = &self.net {
+                net.watch(id);
+            }
         }
     }
 
@@ -495,6 +525,7 @@ impl State {
 
     pub fn watch_ended(&mut self, id: &str) {
         self.watching.remove(id);
+        self.watch_next();
     }
 
     /// The server's list, most recent first: keeps what the app already holds for each, adds
@@ -562,8 +593,12 @@ impl State {
             self.preview = None;
         }
         for (id, e) in effects {
-            self.run(&id, e);
+            match e {
+                Effect::Watch => self.want_watch(&id),
+                Effect::FetchImage => self.run(&id, e),
+            }
         }
+        self.watch_next();
         if let Some(sel) = self.selected.clone() {
             self.fetch_image(&sel, true);
         }
