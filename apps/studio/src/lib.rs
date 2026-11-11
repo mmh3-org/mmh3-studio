@@ -1,4 +1,5 @@
 pub mod api;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
 pub mod sizes;
 pub mod thumb;
@@ -6,13 +7,14 @@ pub mod thumb;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rune::{AppSpec, Chrome, ImageCache, KeyEvent, Tx};
+use rune::{AppSpec, ImageCache, KeyEvent, Tx};
 
 mod composer;
 mod gallery;
 mod icons;
 mod net;
 mod preview;
+#[cfg(not(target_arch = "wasm32"))]
 mod scenes;
 mod state;
 mod view;
@@ -58,6 +60,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
 fn spec() -> AppSpec<State> {
     AppSpec {
         min_size: Some((1040.0, 680.0)),
+        #[cfg(not(target_arch = "wasm32"))]
         scenes: scenes::SCENES,
         poll: Some(poll),
         on_key: Some(on_key),
@@ -65,29 +68,30 @@ fn spec() -> AppSpec<State> {
     }
 }
 
-/// Opens the studio window; the binary's whole `main`.
+/// Opens the studio: the native binary's whole `main`, and the web build's entry.
 pub fn run() {
+    #[cfg(not(target_arch = "wasm32"))]
     rune::prewarm_gpu();
     let app = rune::App::new(spec());
+    #[cfg(not(target_arch = "wasm32"))]
+    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true });
     let handle = app.handle();
     let ready = handle.clone();
-    let chrome = Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true };
-    app.chrome(chrome)
-        .init(move || {
-            let waker = handle.clone();
-            let images = Arc::new(ImageCache::new(Arc::new(move || waker.wake())));
-            let server = net::server();
-            let net = net::Net::new(handle, &server, images.clone());
-            State::new(Some(net), images, server)
-        })
-        .on_ready(move |_| {
-            ready.update(|s, _| {
-                if let Some(net) = &s.net {
-                    net.start();
-                }
-            });
-        })
-        .run();
+    app.init(move || {
+        let waker = handle.clone();
+        let images = Arc::new(ImageCache::new(Arc::new(move || waker.wake())));
+        let server = net::server();
+        let net = net::Net::new(handle, &server, images.clone());
+        State::new(Some(net), images, server)
+    })
+    .on_ready(move |_| {
+        ready.update(|s, _| {
+            if let Some(net) = &s.net {
+                net.start();
+            }
+        });
+    })
+    .run();
 }
 
 #[cfg(test)]

@@ -62,8 +62,11 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
         };
         let i = id.clone();
         actions = actions.child(act(&icons::SAVE, "save", "Save PNG…", !done, Box::new(move |s, tx| s.save(&i, tx))));
-        let i = id.clone();
-        actions = actions.child(act(&icons::REVEAL, "reveal", "Reveal in Finder", !done, Box::new(move |s, _| s.reveal(&i))));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let i = id.clone();
+            actions = actions.child(act(&icons::REVEAL, "reveal", "Reveal in Finder", !done, Box::new(move |s, _| s.reveal(&i))));
+        }
         let i = id.clone();
         actions = actions.child(act(&icons::PICTURE, "edit-picture", "Edit this picture", !done, Box::new(move |s, _| s.edit_picture(&i))));
         let known = g.request.is_some();
@@ -98,41 +101,44 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
     let item = |label: &str| rune_kit::MenuItem::new(label);
     let known = g.request.is_some();
     let edit = id.to_owned();
-    let (a, b, c, d, e, f) =
-        (id.to_owned(), id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
-    context_menu("gallery-menu", trigger, Some(at))
-        .item(item("Save PNG…").icon(&icons::SAVE).disabled(!done).on_select_tx(move |s: &mut State, tx| {
+    let (a, c, d, e, f) = (id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
+    let menu =
+        context_menu("gallery-menu", trigger, Some(at)).item(item("Save PNG…").icon(&icons::SAVE).disabled(!done).on_select_tx(move |s: &mut State, tx| {
             s.menu = None;
             s.save(&a, tx);
-        }))
-        .item(item("Reveal in Finder").icon(&icons::REVEAL).disabled(!done).on_select(move |s: &mut State| {
+        }));
+    #[cfg(not(target_arch = "wasm32"))]
+    let menu = {
+        let b = id.to_owned();
+        menu.item(item("Reveal in Finder").icon(&icons::REVEAL).disabled(!done).on_select(move |s: &mut State| {
             s.menu = None;
             s.reveal(&b);
         }))
-        .item(item("Edit this picture").icon(&icons::PICTURE).disabled(!done).on_select(move |s: &mut State| {
-            s.menu = None;
-            s.edit_picture(&edit);
-        }))
-        .separator()
-        .item(item("Copy prompt").icon(&icons::COPY).disabled(!known).on_select_tx(move |s: &mut State, tx| {
-            s.menu = None;
-            tx.copy(c.clone());
-        }))
-        .item(item("Copy seed").icon(&icons::HASH).disabled(!known).on_select_tx(move |s: &mut State, tx| {
-            s.menu = None;
-            tx.copy(d.clone());
-        }))
-        .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected() || !known).on_select(move |s: &mut State| {
-            s.menu = None;
-            s.rerun(&e);
-        }))
-        .separator()
-        .item(item("Delete").icon(&icons::TRASH).danger(true).disabled(running).on_select(move |s: &mut State| {
-            s.menu = None;
-            s.delete(&f);
-        }))
-        .on_close(|s: &mut State| s.menu = None)
-        .build(k, layer)
+    };
+    menu.item(item("Edit this picture").icon(&icons::PICTURE).disabled(!done).on_select(move |s: &mut State| {
+        s.menu = None;
+        s.edit_picture(&edit);
+    }))
+    .separator()
+    .item(item("Copy prompt").icon(&icons::COPY).disabled(!known).on_select_tx(move |s: &mut State, tx| {
+        s.menu = None;
+        tx.copy(c.clone());
+    }))
+    .item(item("Copy seed").icon(&icons::HASH).disabled(!known).on_select_tx(move |s: &mut State, tx| {
+        s.menu = None;
+        tx.copy(d.clone());
+    }))
+    .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected() || !known).on_select(move |s: &mut State| {
+        s.menu = None;
+        s.rerun(&e);
+    }))
+    .separator()
+    .item(item("Delete").icon(&icons::TRASH).danger(true).disabled(running).on_select(move |s: &mut State| {
+        s.menu = None;
+        s.delete(&f);
+    }))
+    .on_close(|s: &mut State| s.menu = None)
+    .build(k, layer)
 }
 
 fn confirm_delete(s: &State, k: &Kit, layer: &mut Vec<El>) {

@@ -226,8 +226,19 @@ pub struct State {
 
 pub fn random_seed() -> u64 {
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    h.write_u128(entropy());
     h.finish() % 4_294_967_296
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn entropy() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+}
+
+/// The browser has no system clock for std and `RandomState` is unseeded there, so ask it.
+#[cfg(target_arch = "wasm32")]
+fn entropy() -> u128 {
+    (js_sys::Math::random() * 2f64.powi(53)) as u128
 }
 
 impl State {
@@ -707,7 +718,7 @@ impl State {
 
     pub fn save(&mut self, id: &str, tx: &mut Tx) {
         let Some(file) = self.item(id).and_then(|g| g.file().cloned()) else { return };
-        crate::net::save(self, file, format!("mmh3-{id}.png"), tx);
+        crate::net::save(self, &file, &format!("mmh3-{id}.png"), tx);
     }
 
     pub fn ask_for_references(&mut self, tx: &mut Tx) {

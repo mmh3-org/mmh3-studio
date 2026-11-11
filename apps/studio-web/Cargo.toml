@@ -1,0 +1,18 @@
+[package]
+name = "mmh3-studio-web"
+description = "The studio in a browser, through Rune's WebGPU target"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# A cdylib of its own, so the studio's native builds never link one.
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+mmh3-studio = { path = "../studio" }
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

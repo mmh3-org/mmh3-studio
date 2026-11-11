@@ -1567,12 +1567,24 @@ name = "mmh3-studio"
 version = "0.1.0"
 dependencies = [
  "image",
+ "js-sys",
  "png 0.18.1",
  "rune",
  "rune-kit",
  "serde",
  "serde_json",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "mmh3-studio-web"
+version = "0.1.0"
+dependencies = [
+ "mmh3-studio",
+ "wasm-bindgen",
 ]
 
 [[package]]

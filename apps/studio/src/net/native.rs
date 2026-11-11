@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -315,11 +315,11 @@ fn probe(client: &Client, pictures: &Pictures, id: &str) -> Probe {
 }
 
 /// An unreadable file is as good as none: it only costs the prompts of old generations.
-fn read_requests(file: &std::path::Path) -> Requests {
+fn read_requests(file: &Path) -> Requests {
     std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
-fn write_requests(file: &std::path::Path, requests: &Requests) -> std::io::Result<()> {
+fn write_requests(file: &Path, requests: &Requests) -> std::io::Result<()> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -352,8 +352,9 @@ pub fn ask_for_references(_: &State, tx: &mut Tx) {
 }
 
 /// Asks where to save the PNG at `file` with the system's Save dialog, then copies it there.
-pub fn save(_: &State, file: PathBuf, name: String, tx: &mut Tx) {
-    let options = rune::FileDialogOptions { title: "Save image".into(), file_name: Some(name), ..Default::default() }.filter("PNG image", &["png"]);
+pub fn save(_: &State, file: &Path, name: &str, tx: &mut Tx) {
+    let file = file.to_owned();
+    let options = rune::FileDialogOptions { title: "Save image".into(), file_name: Some(name.to_owned()), ..Default::default() }.filter("PNG image", &["png"]);
     tx.save_file(options, move |s: &mut State, answer, _tx| match answer {
         Ok(Some(to)) => match &s.net {
             Some(net) => net.copy(file.clone(), to),

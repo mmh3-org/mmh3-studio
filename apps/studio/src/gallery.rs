@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 
-use rune::{DragItem, El, SurfaceFit, col, el, memo, row, text};
+#[cfg(not(target_arch = "wasm32"))]
+use rune::DragItem;
+
+use rune::{El, SurfaceFit, col, el, memo, row, text};
 use rune_kit::shell::Sidebar;
 use rune_kit::{Kit, Progress, Spinner};
 
@@ -90,6 +93,7 @@ fn thumb(g: &Gen, k: &Kit) -> El {
         (Phase::Failed(_), _) => t.child(text("!").font(k.ty.ui_medium).color(c.danger.fg)),
         _ => t,
     };
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(file) = g.file().cloned() {
         t = t.drag_out(move |_: &State| Some(DragItem::new().file(file.clone())));
     }

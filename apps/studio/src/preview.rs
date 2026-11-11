@@ -45,7 +45,8 @@ fn empty(s: &State, k: &Kit) -> El {
 
 pub fn start_command(s: &State) -> String {
     let mut cmd = String::from("export MMH3_MODELS=$PWD/models\ntarget/release/mmh3 server");
-    if s.server != crate::api::DEFAULT_SERVER {
+    // The web build's server is the page's own origin, which proxies to wherever mmh3 listens.
+    if cfg!(not(target_arch = "wasm32")) && s.server != crate::api::DEFAULT_SERVER {
         let _ = write!(cmd, " --listen {}", s.host());
     }
     cmd

@@ -1,8 +1,11 @@
 //! Gallery thumbnails, decoded a row at a time and averaged into place, so a 16 MP PNG never
-//! sits in memory as full-size RGBA.
+//! sits in memory as full-size RGBA. The web build only shares their size: the browser decodes
+//! there.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
 
+#[cfg(not(target_arch = "wasm32"))]
 use png::{ColorType, Transformations};
 
 /// The longest side of a gallery thumbnail, in pixels.
@@ -18,6 +21,7 @@ pub fn fit(width: u32, height: u32, side: u32) -> (u32, u32) {
     (scale(width), scale(height))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn thumbnail(png: &[u8]) -> Result<image::RgbaImage, String> {
     let mut decoder = png::Decoder::new(Cursor::new(png));
     decoder.set_transformations(Transformations::normalize_to_color8());
@@ -60,6 +64,7 @@ pub fn thumbnail(png: &[u8]) -> Result<image::RgbaImage, String> {
     image::RgbaImage::from_raw(tw, th, pixels).ok_or_else(|| "The thumbnail's size didn't add up.".to_owned())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// A thumbnail of a reference picture, PNG or JPEG, turned the way its EXIF says, as mmh3 turns
 /// it before it reads it.
 pub fn reference(bytes: &[u8]) -> Result<image::RgbaImage, String> {
@@ -76,6 +81,7 @@ pub fn reference(bytes: &[u8]) -> Result<image::RgbaImage, String> {
     Ok(picture.thumbnail(SIDE, SIDE).to_rgba8())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Decodes the whole image first; for the rare PNG that can't be read a row at a time.
 fn whole(png: &[u8]) -> Result<image::RgbaImage, String> {
     let full = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| e.to_string())?;

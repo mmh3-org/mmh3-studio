@@ -1,7 +1,8 @@
 use rune::Icon;
 
 macro_rules! stroked {
-    ($name:ident, $id:literal, $d:literal) => {
+    ($(#[$meta:meta])* $name:ident, $id:literal, $d:literal) => {
+        $(#[$meta])*
         pub static $name: Icon = Icon {
             name: $id,
             view: 16.0,
@@ -12,6 +13,7 @@ macro_rules! stroked {
 
 stroked!(SAVE, "studio-save", "M8 2.5V10M4.75 6.75L8 10L11.25 6.75M3 12.5H13");
 stroked!(
+    #[cfg(not(target_arch = "wasm32"))]
     REVEAL,
     "studio-reveal",
     "M2.5 4.5C2.5 3.95 2.95 3.5 3.5 3.5H6.25L7.5 5H12.5C13.05 5 13.5 5.45 13.5 6V11.5C13.5 12.05 13.05 12.5 12.5 12.5H3.5C2.95 12.5 2.5 12.05 2.5 11.5Z"
