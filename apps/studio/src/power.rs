@@ -1,7 +1,7 @@
-//! Whether macOS lets the GPU run at full speed. A Mac outside High Power Mode, on battery, on
-//! a small adapter or held back for heat keeps the GPU at a low clock, and a generation takes
-//! two or three times as long. Another process keeping the CPU busy takes from the same power
-//! budget.
+//! Whether macOS lets the GPU run at full speed. A Mac outside High Power Mode, on battery or
+//! held back for heat keeps the GPU at a low clock, and a generation takes two or three times
+//! as long. A small adapter or another process keeping the CPU busy takes a share of the power
+//! the GPU runs on.
 //!
 //! Everything is read from `pmset`, `sysctl`, `ps` and `NSProcessInfo`, none of which needs
 //! root.
@@ -100,9 +100,10 @@ impl Issue {
         matches!(self, Issue::LowPower | Issue::NotHighPower)
     }
 
-    /// Slows the GPU by lowering its clock a lot, rather than by taking a share of its power.
+    /// Makes macOS hold the GPU at a low clock. A small adapter or a busy process costs a share
+    /// of the power at most, not the two-to-three-fold slowdown of a low clock.
     pub fn is_clock(&self) -> bool {
-        !matches!(self, Issue::Busy(_))
+        matches!(self, Issue::LowPower | Issue::NotHighPower | Issue::Battery | Issue::Draining | Issue::Hot(_))
     }
 }
 
@@ -520,6 +521,7 @@ mod tests {
         let words = capped.issues()[0].describe();
         assert!(words.contains("under the 96 W recommended for this Mac"), "{words}");
         assert!(words.contains("14-inch MacBook Pro limit its GPU whatever the adapter"), "{words}");
+        assert!(!capped.issues()[0].is_clock(), "input is capped near 97 W, so a few watts short is no low clock");
     }
 
     #[test]

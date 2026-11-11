@@ -379,6 +379,26 @@ fn a_busy_process_alone_names_itself_without_the_low_clock_warning() {
 }
 
 #[test]
+fn a_small_adapter_alone_does_not_claim_a_low_clock() {
+    let mut rt = runtime(scenes::power, false);
+    rt.update(|s, _| {
+        s.power = Some(power::Power {
+            mode: Some(power::Mode::High),
+            high_available: true,
+            chip: power::Chip::Large { capped_case: true },
+            source: Some(power::Source::Adapter { watts: Some(90), draining: false }),
+            ..Default::default()
+        });
+    });
+    rt.frame(1.0 / 60.0);
+    let detail = text_of(&rt, "power-detail");
+    assert!(detail.contains("whatever the adapter"), "{detail}");
+    assert!(!detail.contains("low clock") && !detail.contains("two to three times"), "{detail}");
+    assert_eq!(text_of(&rt, "power-title"), "Generations may run a little slower");
+    assert!(rt.find("power-copy-command").is_none());
+}
+
+#[test]
 fn a_mac_at_full_speed_shows_no_banner_and_no_command() {
     let mut rt = runtime(scenes::power, false);
     rt.update(|s, _| {

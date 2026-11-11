@@ -311,13 +311,14 @@ fn power_banner(s: &State, k: &Kit) -> Option<El> {
         detail.push("macOS keeps the GPU at a low clock, which often makes a generation two to three times slower.".into());
     }
     detail.extend(other.iter().map(|i| i.describe()));
+    let title = if clock.is_empty() { "Generations may run a little slower" } else { "The GPU is held back, so generations run slower" };
     let words = col()
         .key("power-words")
         .gap(2.0)
         .grow(1.0)
         .shrink()
         .min_w(0.0)
-        .child(text("The GPU is held back, so generations run slower").key("power-title").font(k.ty.ui_medium).color(c.warning.fg).wrap())
+        .child(text(title).key("power-title").font(k.ty.ui_medium).color(c.warning.fg).wrap())
         .child(text(detail.join(" ")).key("power-detail").font(k.ty.small).color(c.warning.fg).wrap());
     let mut actions = row().key("power-actions").gap(6.0).center_y();
     #[cfg(not(target_arch = "wasm32"))]
