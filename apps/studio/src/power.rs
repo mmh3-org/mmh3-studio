@@ -6,6 +6,8 @@
 //! Everything is read from `pmset`, `sysctl`, `ps` and `NSProcessInfo`, none of which needs
 //! root.
 
+use std::time::{Duration, Instant};
+
 /// The Energy Mode macOS runs in: `pmset`'s `powermode` 0, 1 and 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -281,10 +283,35 @@ fn closable_name(comm: &str) -> Option<String> {
     Some(app.unwrap_or(file).to_owned())
 }
 
-/// The busiest process heavy in both samples: one that stays busy across two polls, not a
-/// moment's spike.
-pub fn sustained(before: &[Process], now: &[Process]) -> Option<String> {
-    now.iter().filter(|p| before.iter().any(|b| b.pid == p.pid)).max_by(|a, b| a.cpu.total_cmp(&b.cpu)).map(|p| p.name.clone())
+/// The busiest process heavy in both samples.
+fn sustained(before: &[Process], now: &[Process]) -> Option<Process> {
+    now.iter().filter(|p| before.iter().any(|b| b.pid == p.pid)).max_by(|a, b| a.cpu.total_cmp(&b.cpu)).cloned()
+}
+
+/// How far apart two samples must be for a process heavy in both to count as staying busy.
+/// A little under the 30-second poll, as a poll can fire a moment early.
+pub const BUSY_SPAN: Duration = Duration::from_secs(25);
+
+/// Names a process that stays busy across two polls, not a moment's spike or a compile that
+/// a focus check catches twice within seconds.
+#[derive(Default)]
+pub struct BusyWatch {
+    baseline: Option<(Instant, Vec<Process>)>,
+    named: Option<Process>,
+}
+
+impl BusyWatch {
+    pub fn observe(&mut self, at: Instant, sample: Vec<Process>) -> Option<String> {
+        match &self.baseline {
+            Some((then, before)) if at.duration_since(*then) >= BUSY_SPAN => {
+                self.named = sustained(before, &sample);
+                self.baseline = Some((at, sample));
+            }
+            Some(_) => self.named = self.named.take().filter(|p| sample.iter().any(|s| s.pid == p.pid)),
+            None => self.baseline = Some((at, sample)),
+        }
+        self.named.as_ref().map(|p| p.name.clone())
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -294,13 +321,13 @@ pub use native::{Watch, open_energy_settings, watch};
 mod native {
     use std::process::Command;
     use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use rune::AppHandle;
 
     use super::{
-        Chip, ENERGY_SETTINGS_URL, Power, Process, Thermal, parse_busy, parse_capped_case, parse_high_available, parse_large_chip, parse_mode, parse_source,
-        sustained,
+        BusyWatch, Chip, ENERGY_SETTINGS_URL, Power, Process, Thermal, parse_busy, parse_capped_case, parse_high_available, parse_large_chip, parse_mode,
+        parse_source,
     };
     use crate::state::State;
 
@@ -385,10 +412,9 @@ mod native {
         let _ = rune::task::spawn("mmh3-power", move || {
             let machine = read_machine();
             let mut last = None;
-            let mut heavy = Vec::new();
+            let mut busy = BusyWatch::default();
             loop {
-                let before = std::mem::replace(&mut heavy, read_busy());
-                let now = read(machine, sustained(&before, &heavy));
+                let now = read(machine, busy.observe(Instant::now(), read_busy()));
                 if last.as_ref() != Some(&now) {
                     let power = now.clone();
                     handle.update(move |s, _| s.power = Some(power));
@@ -503,12 +529,31 @@ mod tests {
     fn a_process_is_named_once_it_stays_busy_across_two_polls() {
         let busy = parse_busy(PROCESSES_BUSY, STUDIO_PID);
         let quiet = parse_busy(PROCESSES_QUIET, STUDIO_PID);
-        assert_eq!(sustained(&quiet, &busy), None, "a single poll may be a spike");
-        assert_eq!(sustained(&busy, &busy).as_deref(), Some("bun"), "the busiest of them");
-        assert_eq!(sustained(&busy, &busy[2..3]).as_deref(), Some("Google Chrome"));
-        assert_eq!(sustained(&busy, &quiet), None, "it calmed down");
-        let restarted = [Process { pid: 70001, ..busy[3].clone() }];
-        assert_eq!(sustained(&busy, &restarted), None, "a new process with the same name starts over");
+        let start = Instant::now();
+        let poll = |n: u32| start + Duration::from_secs(30) * n;
+        let mut watch = BusyWatch::default();
+        assert_eq!(watch.observe(poll(0), quiet.clone()), None);
+        assert_eq!(watch.observe(poll(1), busy.clone()), None, "a single poll may be a spike");
+        assert_eq!(watch.observe(poll(2), busy.clone()).as_deref(), Some("bun"), "the busiest of them");
+        assert_eq!(watch.observe(poll(3), busy[2..3].to_vec()).as_deref(), Some("Google Chrome"));
+        assert_eq!(watch.observe(poll(4), quiet.clone()), None, "it calmed down");
+        let restarted = vec![Process { pid: 70001, ..busy[3].clone() }];
+        assert_eq!(watch.observe(poll(5), restarted), None, "a new process with the same name starts over");
+    }
+
+    #[test]
+    fn a_focus_check_soon_after_a_poll_does_not_count_as_the_second_poll() {
+        let busy = parse_busy(PROCESSES_BUSY, STUDIO_PID);
+        let quiet = parse_busy(PROCESSES_QUIET, STUDIO_PID);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut watch = BusyWatch::default();
+        assert_eq!(watch.observe(at(0), busy.clone()), None);
+        assert_eq!(watch.observe(at(2), busy.clone()), None, "two seconds is no sustained load");
+        assert_eq!(watch.observe(at(30), busy.clone()).as_deref(), Some("bun"), "the poll compares with the reading 30 s back");
+        assert_eq!(watch.observe(at(33), busy[2..3].to_vec()), None, "a focus check drops a process that has calmed down");
+        assert_eq!(watch.observe(at(40), busy.clone()), None, "and never names one on a short span");
+        assert_eq!(watch.observe(at(60), quiet), None);
     }
 
     fn laptop(mode: Mode, source: Source) -> Power {
