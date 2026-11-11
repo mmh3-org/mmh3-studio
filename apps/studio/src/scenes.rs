@@ -171,7 +171,7 @@ pub fn references(s: &mut State) {
 }
 
 /// A 14-inch laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which
-/// can't keep its battery up under a generation.
+/// can't keep its battery up under a generation, while another process keeps the CPU busy.
 pub fn power(s: &mut State) {
     running(s);
     s.power = Some(Power {
@@ -179,6 +179,7 @@ pub fn power(s: &mut State) {
         high_available: true,
         chip: Chip::Large { capped_case: true },
         source: Some(Source::Adapter { watts: Some(90), draining: true }),
+        busy: Some("bun".into()),
         ..Power::default()
     });
 }

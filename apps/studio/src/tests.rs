@@ -338,6 +338,7 @@ fn the_power_banner_names_the_causes_offers_the_fixes_and_stays_closed() {
     assert!(detail.contains("Energy Mode is Automatic"), "{detail}");
     assert!(detail.contains("90 W adapter"), "{detail}");
     assert!(detail.contains("whatever the adapter"), "{detail}");
+    assert!(detail.contains("bun is using a lot of CPU"), "{detail}");
     assert!(text_of(&rt, "status-power-text").contains("Automatic power, 90 W adapter"));
     let (x, y) = rt.find("power-copy-command").unwrap();
     rt.pointer_down(x, y);
@@ -357,6 +358,24 @@ fn the_power_banner_names_the_causes_offers_the_fixes_and_stays_closed() {
     });
     rt.frame(1.0 / 60.0);
     assert!(rt.find("power-banner").is_some(), "a new cause brings it back");
+}
+
+#[test]
+fn a_busy_process_alone_names_itself_without_the_low_clock_warning() {
+    let mut rt = runtime(scenes::power, false);
+    rt.update(|s, _| {
+        s.power = Some(power::Power {
+            mode: Some(power::Mode::High),
+            high_available: true,
+            chip: power::Chip::Large { capped_case: false },
+            source: Some(power::Source::Adapter { watts: Some(96), draining: false }),
+            busy: Some("bun".into()),
+            ..Default::default()
+        });
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(text_of(&rt, "power-detail"), "bun is using a lot of CPU, which takes power from the GPU; closing it can speed up generation.");
+    assert!(rt.find("power-copy-command").is_none());
 }
 
 #[test]

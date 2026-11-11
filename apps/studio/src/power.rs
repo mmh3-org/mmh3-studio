@@ -1,8 +1,10 @@
 //! Whether macOS lets the GPU run at full speed. A Mac outside High Power Mode, on battery, on
 //! a small adapter or held back for heat keeps the GPU at a low clock, and a generation takes
-//! two or three times as long.
+//! two or three times as long. Another process keeping the CPU busy takes from the same power
+//! budget.
 //!
-//! Everything is read from `pmset`, `sysctl` and `NSProcessInfo`, none of which needs root.
+//! Everything is read from `pmset`, `sysctl`, `ps` and `NSProcessInfo`, none of which needs
+//! root.
 
 /// The Energy Mode macOS runs in: `pmset`'s `powermode` 0, 1 and 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub struct Power {
     pub low_power: bool,
     pub thermal: Thermal,
     pub source: Option<Source>,
+    /// The name of another process that has kept the CPU busy since the last poll.
+    pub busy: Option<String>,
 }
 
 /// The smallest adapter recommended for a laptop with a Max or Ultra chip.
@@ -69,6 +73,7 @@ pub enum Issue {
     Draining,
     SmallAdapter { watts: u32, capped_case: bool },
     Hot(Thermal),
+    Busy(String),
 }
 
 impl Issue {
@@ -86,12 +91,18 @@ impl Issue {
             ),
             Issue::Hot(Thermal::Critical) => "macOS reports a critical thermal state.".into(),
             Issue::Hot(_) => "macOS reports a serious thermal state.".into(),
+            Issue::Busy(name) => format!("{name} is using a lot of CPU, which takes power from the GPU; closing it can speed up generation."),
         }
     }
 
     /// Fixed by switching Energy Mode, which the copied command does.
     pub fn is_mode(&self) -> bool {
         matches!(self, Issue::LowPower | Issue::NotHighPower)
+    }
+
+    /// Slows the GPU by lowering its clock a lot, rather than by taking a share of its power.
+    pub fn is_clock(&self) -> bool {
+        !matches!(self, Issue::Busy(_))
     }
 }
 
@@ -123,6 +134,9 @@ impl Power {
         }
         if matches!(self.thermal, Thermal::Serious | Thermal::Critical) {
             issues.push(Issue::Hot(self.thermal));
+        }
+        if let Some(name) = &self.busy {
+            issues.push(Issue::Busy(name.clone()));
         }
         issues
     }
@@ -216,6 +230,50 @@ pub fn parse_capped_case(hw_model: &str) -> bool {
     CAPPED_CASES.contains(&hw_model.trim())
 }
 
+/// A process seen in `ps -Ao pid,pcpu,comm`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Process {
+    pub pid: u32,
+    pub cpu: f32,
+    /// The app's name for a process inside an app bundle, else the executable's file name.
+    pub name: String,
+}
+
+/// The CPU share, in percent of one core, above which a process counts as heavy.
+pub const BUSY_CPU: f32 = 50.0;
+
+/// The processes above [`BUSY_CPU`] that the user could close: not `skip_pid` (the studio), not
+/// mmh3, and not part of macOS.
+pub fn parse_busy(ps: &str, skip_pid: u32) -> Vec<Process> {
+    ps.lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (pid, rest) = line.split_once(char::is_whitespace)?;
+            let rest = rest.trim_start();
+            let (cpu, comm) = rest.split_once(char::is_whitespace)?;
+            let (pid, cpu) = (pid.parse().ok()?, cpu.parse().ok()?);
+            let comm = comm.trim();
+            (cpu > BUSY_CPU && pid != skip_pid && !is_system(comm)).then(|| Process { pid, cpu, name: process_name(comm) })
+        })
+        .filter(|p| p.name != "mmh3")
+        .collect()
+}
+
+fn is_system(comm: &str) -> bool {
+    comm == "kernel_task" || ["/System/", "/sbin/", "/usr/sbin/", "/usr/libexec/"].iter().any(|dir| comm.starts_with(dir))
+}
+
+fn process_name(comm: &str) -> String {
+    let app = comm.split('/').find_map(|part| part.strip_suffix(".app")).filter(|name| !name.is_empty());
+    app.unwrap_or_else(|| comm.rsplit('/').next().unwrap_or(comm)).to_owned()
+}
+
+/// The busiest process heavy in both samples: one that stays busy across two polls, not a
+/// moment's spike.
+pub fn sustained(before: &[Process], now: &[Process]) -> Option<String> {
+    now.iter().filter(|p| before.iter().any(|b| b.pid == p.pid)).max_by(|a, b| a.cpu.total_cmp(&b.cpu)).map(|p| p.name.clone())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Watch, open_energy_settings, watch};
 
@@ -227,7 +285,10 @@ mod native {
 
     use rune::AppHandle;
 
-    use super::{Chip, ENERGY_SETTINGS_URL, Power, Thermal, parse_capped_case, parse_high_available, parse_large_chip, parse_mode, parse_source};
+    use super::{
+        Chip, ENERGY_SETTINGS_URL, Power, Process, Thermal, parse_busy, parse_capped_case, parse_high_available, parse_large_chip, parse_mode, parse_source,
+        sustained,
+    };
     use crate::state::State;
 
     const EVERY: Duration = Duration::from_secs(30);
@@ -235,6 +296,7 @@ mod native {
     fn run(program: &str, args: &[&str]) -> String {
         Command::new(program)
             .args(args)
+            .env("LC_ALL", "C")
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -260,7 +322,11 @@ mod native {
         }
     }
 
-    fn read(machine: Machine) -> Power {
+    fn read_busy() -> Vec<Process> {
+        parse_busy(&run("/bin/ps", &["-Ao", "pid,pcpu,comm"]), std::process::id())
+    }
+
+    fn read(machine: Machine, busy: Option<String>) -> Power {
         let (low_power, thermal) = process_info();
         Power {
             mode: parse_mode(&run("/usr/bin/pmset", &["-g"])),
@@ -269,6 +335,7 @@ mod native {
             low_power,
             thermal,
             source: parse_source(&run("/usr/bin/pmset", &["-g", "ps"]), &run("/usr/bin/pmset", &["-g", "ac"])),
+            busy,
         }
     }
 
@@ -305,8 +372,10 @@ mod native {
         let _ = rune::task::spawn("mmh3-power", move || {
             let machine = read_machine();
             let mut last = None;
+            let mut heavy = Vec::new();
             loop {
-                let now = read(machine);
+                let before = std::mem::replace(&mut heavy, read_busy());
+                let now = read(machine, sustained(&before, &heavy));
                 if last.as_ref() != Some(&now) {
                     let power = now.clone();
                     handle.update(move |s, _| s.power = Some(power));
@@ -357,6 +426,9 @@ mod tests {
     const PS_AC: &str = include_str!("../fixtures/pmset/ps-ac.txt");
     const PS_AC_DRAINING: &str = include_str!("../fixtures/pmset/ps-ac-draining.txt");
     const PS_BATTERY: &str = include_str!("../fixtures/pmset/ps-battery.txt");
+    const PROCESSES_BUSY: &str = include_str!("../fixtures/ps/busy.txt");
+    const PROCESSES_QUIET: &str = include_str!("../fixtures/ps/quiet.txt");
+    const STUDIO_PID: u32 = 4411;
 
     #[test]
     fn the_energy_mode_reads_from_pmset() {
@@ -404,6 +476,28 @@ mod tests {
         assert!(!parse_capped_case(""));
     }
 
+    #[test]
+    fn heavy_processes_leave_out_the_studio_mmh3_and_macos() {
+        let busy = parse_busy(PROCESSES_BUSY, STUDIO_PID);
+        let names: Vec<&str> = busy.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Google Chrome", "bun"]);
+        assert_eq!(busy[1], Process { pid: 61207, cpu: 101.3, name: "bun".into() });
+        assert_eq!(parse_busy(PROCESSES_QUIET, STUDIO_PID), []);
+        assert_eq!(parse_busy("", STUDIO_PID), []);
+    }
+
+    #[test]
+    fn a_process_is_named_once_it_stays_busy_across_two_polls() {
+        let busy = parse_busy(PROCESSES_BUSY, STUDIO_PID);
+        let quiet = parse_busy(PROCESSES_QUIET, STUDIO_PID);
+        assert_eq!(sustained(&quiet, &busy), None, "a single poll may be a spike");
+        assert_eq!(sustained(&busy, &busy).as_deref(), Some("bun"), "the busiest of them");
+        assert_eq!(sustained(&busy, &busy[..1]).as_deref(), Some("Google Chrome"));
+        assert_eq!(sustained(&busy, &quiet), None, "it calmed down");
+        let restarted = [Process { pid: 70001, ..busy[1].clone() }];
+        assert_eq!(sustained(&busy, &restarted), None, "a new process with the same name starts over");
+    }
+
     fn laptop(mode: Mode, source: Source) -> Power {
         Power { mode: Some(mode), high_available: true, chip: Chip::Large { capped_case: false }, source: Some(source), ..Power::default() }
     }
@@ -426,6 +520,14 @@ mod tests {
         let words = capped.issues()[0].describe();
         assert!(words.contains("under the 96 W recommended for this Mac"), "{words}");
         assert!(words.contains("14-inch MacBook Pro limit its GPU whatever the adapter"), "{words}");
+    }
+
+    #[test]
+    fn a_busy_process_is_named_and_does_not_count_as_a_lower_clock() {
+        let p = Power { busy: Some("bun".into()), ..laptop(Mode::High, Source::Adapter { watts: Some(96), draining: false }) };
+        assert_eq!(p.issues(), [Issue::Busy("bun".into())]);
+        assert_eq!(p.issues()[0].describe(), "bun is using a lot of CPU, which takes power from the GPU; closing it can speed up generation.");
+        assert!(!p.issues()[0].is_clock());
     }
 
     #[test]

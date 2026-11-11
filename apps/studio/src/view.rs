@@ -305,7 +305,12 @@ fn power_banner(s: &State, k: &Kit) -> Option<El> {
         return None;
     }
     let c = &k.c;
-    let causes = issues.iter().map(Issue::describe).collect::<Vec<_>>().join(" ");
+    let (clock, other): (Vec<&Issue>, Vec<&Issue>) = issues.iter().partition(|i| i.is_clock());
+    let mut detail: Vec<String> = clock.iter().map(|i| i.describe()).collect();
+    if !clock.is_empty() {
+        detail.push("macOS keeps the GPU at a low clock, which often makes a generation two to three times slower.".into());
+    }
+    detail.extend(other.iter().map(|i| i.describe()));
     let words = col()
         .key("power-words")
         .gap(2.0)
@@ -313,13 +318,7 @@ fn power_banner(s: &State, k: &Kit) -> Option<El> {
         .shrink()
         .min_w(0.0)
         .child(text("The GPU is held back, so generations run slower").key("power-title").font(k.ty.ui_medium).color(c.warning.fg).wrap())
-        .child(
-            text(format!("{causes} macOS keeps the GPU at a low clock, which often makes a generation two to three times slower."))
-                .key("power-detail")
-                .font(k.ty.small)
-                .color(c.warning.fg)
-                .wrap(),
-        );
+        .child(text(detail.join(" ")).key("power-detail").font(k.ty.small).color(c.warning.fg).wrap());
     let mut actions = row().key("power-actions").gap(6.0).center_y();
     #[cfg(not(target_arch = "wasm32"))]
     {

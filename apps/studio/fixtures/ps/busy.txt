@@ -1,0 +1,12 @@
+  PID  %CPU COMM
+    0  64.1 kernel_task
+    1   2.6 /sbin/launchd
+  115   0.0 /System/Library/PrivateFrameworks/FileProviderDaemon.framework/XPCServices/FPCKService.xpc/Contents/MacOS/FPCKService
+  702  58.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1205   9.1 /System/Library/CoreServices/MenuBarAgent.app/Contents/MacOS/MenuBarAgent
+ 4410  71.0 /Users/me/.local/bin/mmh3
+ 4411  62.0 /Users/me/ghq/github.com/ryoppippi/mmh3-studio/target/release/mmh3-studio
+37550  88.8 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/146.0.7680.80/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)
+59318  16.8 /Applications/Hex.app/Contents/MacOS/hex
+61207 101.3 /Users/me/.bun/bin/bun
+73719   8.8 /usr/sbin/coreaudiod
