@@ -187,6 +187,7 @@ pub fn server_from_args() -> String {
 impl State {
     pub fn new(net: Option<Net>, images: Arc<ImageCache>, server: String) -> State {
         State {
+            requests: net.as_ref().map(Net::requests).unwrap_or_default(),
             net,
             images,
             server,
@@ -208,7 +209,6 @@ impl State {
             clock: 0.0,
             tick: 0,
             watching: HashSet::new(),
-            requests: HashMap::new(),
             next_local: 0,
         }
     }
@@ -312,6 +312,7 @@ impl State {
         let request = self.item(local).and_then(|g| g.request.clone());
         if let Some(r) = &request {
             self.requests.insert(created.id.clone(), r.clone());
+            self.remember();
         }
         if let Some(g) = self.item_mut(&created.id) {
             g.request = request;
@@ -342,6 +343,12 @@ impl State {
         match effect {
             Effect::Watch => self.watch(id),
             Effect::FetchImage => self.fetch_image(id, true),
+        }
+    }
+
+    fn remember(&self) {
+        if let Some(net) = &self.net {
+            net.remember(self.requests.clone());
         }
     }
 
@@ -407,7 +414,11 @@ impl State {
         }
         self.gens = gens;
         let listed: HashSet<&str> = list.iter().map(|g| g.id.as_str()).collect();
+        let before = self.requests.len();
         self.requests.retain(|id, _| listed.contains(id.as_str()));
+        if self.requests.len() != before {
+            self.remember();
+        }
         let gone: Vec<String> = old.into_iter().filter(|o| !o.is_local()).map(|o| o.id).collect();
         if let (Some(net), false) = (&self.net, gone.is_empty()) {
             net.forget(&gone);
@@ -486,6 +497,9 @@ impl State {
 
     pub fn deleted(&mut self, id: &str) {
         self.gens.retain(|g| g.id != id);
+        if self.requests.remove(id).is_some() {
+            self.remember();
+        }
         if self.selected.as_deref() == Some(id) {
             self.selected = None;
             self.preview = None;

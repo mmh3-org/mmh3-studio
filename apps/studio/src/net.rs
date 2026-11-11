@@ -1,7 +1,7 @@
 //! The studio's background work. Every request runs on its own thread and lands its answer in
 //! the state through the app handle, which commits it on the next frame.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use mmh3_studio::api::{Client, Error, Generation, ImageRequest, Status};
+
+pub type Requests = HashMap<String, ImageRequest>;
 use mmh3_studio::thumb::thumbnail;
 use rune::{AppHandle, ImageCache};
 
@@ -110,13 +112,28 @@ pub struct Net {
     client: Client,
     pictures: Arc<Pictures>,
     wake: Sender<()>,
+    /// Where what the studio asked this server for is kept between runs.
+    requests_file: PathBuf,
+    remember: Sender<Requests>,
 }
 
 impl Net {
     pub fn new(handle: AppHandle<State>, server: &str, images: Arc<ImageCache>) -> Net {
         let client = Client::new(server);
-        let root = rune::dirs::AppDirs::new("dev.mmh3.studio").map_or_else(|| std::env::temp_dir().join("mmh3-studio"), |d| d.cache().join("images"));
-        let pictures = Arc::new(Pictures { dir: root.join(folder_for(client.base())), queue: Mutex::default() });
+        let dirs = rune::dirs::AppDirs::new("dev.mmh3.studio");
+        let (cache, data) = match &dirs {
+            Some(d) => (d.cache().join("images"), d.data().join("requests")),
+            None => (std::env::temp_dir().join("mmh3-studio/images"), std::env::temp_dir().join("mmh3-studio/requests")),
+        };
+        let folder = folder_for(client.base());
+        let pictures = Arc::new(Pictures { dir: cache.join(&folder), queue: Mutex::default() });
+        let requests_file = data.join(format!("{folder}.json"));
+        let (remember, kept) = channel::<Requests>();
+        let file = requests_file.clone();
+        let _ = rune::task::serve("mmh3-requests", kept, move |requests| {
+            let _ = write_requests(&file, &requests);
+            ControlFlow::Continue(())
+        });
         let (wake, rx) = channel::<()>();
         let (h, c, p) = (handle.clone(), client.clone(), pictures.clone());
         let _ = rune::task::serve("mmh3-pictures", rx, move |()| {
@@ -134,7 +151,17 @@ impl Net {
             });
             ControlFlow::Continue(())
         });
-        Net { handle, client, pictures, wake }
+        Net { handle, client, pictures, wake, requests_file, remember }
+    }
+
+    /// What the studio asked this server for in earlier runs, by the server's id.
+    pub fn requests(&self) -> Requests {
+        read_requests(&self.requests_file)
+    }
+
+    /// Keeps `requests` for the next run, written in the order they were handed over.
+    pub fn remember(&self, requests: Requests) {
+        let _ = self.remember.send(requests);
     }
 
     /// Polls the server's status every two seconds, landing it only when it changes; a change
@@ -282,6 +309,20 @@ impl Net {
     }
 }
 
+/// An unreadable file is as good as none: it only costs the prompts of old generations.
+fn read_requests(file: &std::path::Path) -> Requests {
+    std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn write_requests(file: &std::path::Path, requests: &Requests) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let part = file.with_extension("json.part");
+    std::fs::write(&part, serde_json::to_vec_pretty(requests).map_err(std::io::Error::other)?)?;
+    std::fs::rename(part, file)
+}
+
 /// One cache folder a server, since ids are only unique on the server that made them.
 fn folder_for(base: &str) -> String {
     let host = base.split("://").nth(1).unwrap_or(base);
@@ -292,4 +333,28 @@ pub fn reveal(file: PathBuf) {
     let _ = rune::task::spawn("mmh3-reveal", move || {
         let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&file).status();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_survive_a_restart_and_a_broken_file_reads_as_none() {
+        let file = std::env::temp_dir().join(format!("mmh3-studio-requests-{}/127.0.0.1-8833.json", std::process::id()));
+        let request = ImageRequest {
+            prompt: "<Picture 1> at night".into(),
+            seed: 3,
+            width: 4096,
+            height: 4096,
+            min_generation_area: None,
+            references: vec![PathBuf::from("/tmp/street.jpg")],
+        };
+        let requests: Requests = [("6912f3a40003".to_owned(), request)].into();
+        write_requests(&file, &requests).unwrap();
+        assert_eq!(read_requests(&file), requests);
+        std::fs::write(&file, b"{not json").unwrap();
+        assert!(read_requests(&file).is_empty());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
 }
