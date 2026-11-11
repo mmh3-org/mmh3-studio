@@ -230,22 +230,6 @@ pub fn random_seed() -> u64 {
     h.finish() % 4_294_967_296
 }
 
-/// Asks for a picture to edit with the system's Open dialog.
-pub fn ask_for_reference(tx: &mut Tx) {
-    let options = rune::FileDialogOptions { title: "Add a picture to edit".into(), ..Default::default() }.filter("PNG or JPEG picture", &REFERENCE_EXTENSIONS);
-    tx.open_file(options, |s: &mut State, answer, _tx| match answer {
-        Ok(Some(path)) => s.add_references(&[path]),
-        Ok(None) => {}
-        Err(e) => s.note("Couldn't open the file dialog.", Some(format!("{e:?}")), true),
-    });
-}
-
-pub fn server_from_args() -> String {
-    let args = rune::extra_args();
-    let flag = args.iter().position(|a| a == "--server").and_then(|i| args.get(i + 1)).cloned();
-    flag.or_else(|| std::env::var("MMH3_SERVER").ok()).unwrap_or_else(|| api::DEFAULT_SERVER.to_owned())
-}
-
 impl State {
     pub fn new(net: Option<Net>, images: Arc<ImageCache>, server: String) -> State {
         State {
@@ -723,18 +707,14 @@ impl State {
 
     pub fn save(&mut self, id: &str, tx: &mut Tx) {
         let Some(file) = self.item(id).and_then(|g| g.file().cloned()) else { return };
-        let options = rune::FileDialogOptions { title: "Save image".into(), file_name: Some(format!("mmh3-{id}.png")), ..Default::default() }
-            .filter("PNG image", &["png"]);
-        tx.save_file(options, move |s: &mut State, answer, _tx| match answer {
-            Ok(Some(to)) => match &s.net {
-                Some(net) => net.save(file.clone(), to),
-                None => s.note("Saving needs the server connection.", None, true),
-            },
-            Ok(None) => {}
-            Err(e) => s.note("Couldn't open the save dialog.", Some(format!("{e:?}")), true),
-        });
+        crate::net::save(self, file, format!("mmh3-{id}.png"), tx);
     }
 
+    pub fn ask_for_references(&mut self, tx: &mut Tx) {
+        crate::net::ask_for_references(self, tx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reveal(&mut self, id: &str) {
         if let Some(file) = self.item(id).and_then(|g| g.file().cloned()) {
             crate::net::reveal(file);

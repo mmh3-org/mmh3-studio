@@ -169,7 +169,7 @@ fn references(s: &State, k: &Kit) -> El {
             .control_size(ControlSize::Small)
             .icon(&icons::PLUS)
             .disabled(count >= MAX_REFERENCES)
-            .on_press_tx(|_: &mut State, tx: &mut Tx| crate::state::ask_for_reference(tx))
+            .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_references(tx))
             .build(k)
             .key("add-reference")
     };

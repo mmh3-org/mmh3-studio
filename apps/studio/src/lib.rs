@@ -76,7 +76,7 @@ pub fn run() {
         .init(move || {
             let waker = handle.clone();
             let images = Arc::new(ImageCache::new(Arc::new(move || waker.wake())));
-            let server = state::server_from_args();
+            let server = net::server();
             let net = net::Net::new(handle, &server, images.clone());
             State::new(Some(net), images, server)
         })

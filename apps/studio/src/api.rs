@@ -1,9 +1,12 @@
-//! A blocking client for `mmh3 server`, as `docs/server.md` in mmh3 describes it: pictures are
-//! asked for at `POST /v1/images` and watched like any other generation. Every call blocks, so
-//! run them off the UI thread.
+//! `mmh3 server`'s API, as `docs/server.md` in mmh3 describes it: pictures are asked for at
+//! `POST /v1/images` and watched like any other generation. The types and the form are shared;
+//! [`Client`] is the native, blocking client, so run its calls off the UI thread. The web build
+//! speaks the same routes through the browser's `fetch` and `EventSource`.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8833";
 pub const IMAGE_STEPS: u32 = 6;
 /// The most reference pictures `mmh3 image` edits.
 pub const MAX_REFERENCES: usize = 16;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_PNG_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,27 +90,36 @@ pub enum Part {
 }
 
 impl ImageRequest {
+    /// The form's text fields, in the order they are sent; the references follow them.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields =
+            vec![("prompt", self.prompt.clone()), ("seed", self.seed.to_string()), ("width", self.width.to_string()), ("height", self.height.to_string())];
+        if let Some(area) = self.min_generation_area {
+            fields.push(("min-generation-area", area.to_string()));
+        }
+        fields
+    }
+
     /// The form's fields, with each reference read from its file.
     pub fn parts(&self) -> std::io::Result<Vec<Part>> {
-        let text = |name, value: String| Part::Text { name, value };
-        let mut parts = vec![
-            text("prompt", self.prompt.clone()),
-            text("seed", self.seed.to_string()),
-            text("width", self.width.to_string()),
-            text("height", self.height.to_string()),
-        ];
-        if let Some(area) = self.min_generation_area {
-            parts.push(text("min-generation-area", area.to_string()));
-        }
+        let mut parts: Vec<Part> = self.fields().into_iter().map(|(name, value)| Part::Text { name, value }).collect();
         for (i, path) in self.references.iter().enumerate() {
             let bytes = std::fs::read(path).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
-            // The server writes every upload of a request into one folder under the name it was
-            // sent with, so two references called `photo.jpg` would become one file there.
-            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
-            parts.push(Part::File { name: "reference", filename: format!("picture-{}.{extension}", i + 1), bytes });
+            parts.push(Part::File { name: REFERENCE_FIELD, filename: reference_name(i, path), bytes });
         }
         Ok(parts)
     }
+}
+
+/// The form field each reference picture is sent in.
+pub const REFERENCE_FIELD: &str = "reference";
+
+/// The name reference `i` is uploaded under. The server writes every upload of a request into
+/// one folder under the name it was sent with, so two references called `photo.jpg` would become
+/// one file there.
+pub fn reference_name(i: usize, path: &Path) -> String {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+    format!("picture-{}.{extension}", i + 1)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +171,7 @@ pub fn multipart(parts: &[Part], boundary: &str) -> (String, Vec<u8>) {
                 body.extend_from_slice(value.as_bytes());
             }
             Part::File { name, filename, bytes } => {
-                let png = std::path::Path::new(filename).extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
+                let png = Path::new(filename).extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
                 let kind = if png { "image/png" } else { "image/jpeg" };
                 body.extend_from_slice(
                     format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {kind}\r\n\r\n").as_bytes(),
@@ -198,6 +211,7 @@ impl SseParser {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct Client {
     base: String,
@@ -206,6 +220,7 @@ pub struct Client {
     long: ureq::Agent,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
     pub fn new(base: impl Into<String>) -> Client {
         let base = base.into().trim_end_matches('/').to_owned();
@@ -261,6 +276,7 @@ impl Client {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn read_events(reader: impl Read, mut each: impl FnMut(Generation)) -> Result<(), Error> {
     let mut parser = SseParser::default();
     let mut emit = |data: String| -> Result<(), Error> {
@@ -280,8 +296,10 @@ pub fn read_events(reader: impl Read, mut each: impl FnMut(Generation)) -> Resul
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type Answer = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn checked(answer: Answer) -> Result<ureq::http::Response<ureq::Body>, Error> {
     let mut response = answer.map_err(|e| Error::Unreachable(e.to_string()))?;
     let status = response.status().as_u16();
@@ -293,6 +311,7 @@ fn checked(answer: Answer) -> Result<ureq::http::Response<ureq::Body>, Error> {
     Err(Error::Refused { status, message })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn json<T: serde::de::DeserializeOwned>(answer: Answer) -> Result<T, Error> {
     let mut response = checked(answer)?;
     let text = response.body_mut().read_to_string().map_err(|e| Error::Unreachable(e.to_string()))?;
