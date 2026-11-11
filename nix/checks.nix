@@ -16,7 +16,15 @@
             cargoClippyExtraArgs = "--all-targets -- -D warnings";
           }
         );
-        studio-test = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
+        studio-test = craneLib.cargoTest (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            # The client, proxy and mock tests talk over loopback sockets,
+            # which Darwin's sandbox denies unless the build asks for them.
+            __darwinAllowLocalNetworking = true;
+          }
+        );
         # The wasm build is the only check that the web-only code compiles.
         studio-web = config.packages.studio-web;
       };
