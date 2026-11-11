@@ -94,6 +94,9 @@ pub struct Net {
     wake: Sender<()>,
     /// Where what the studio asked this server for is kept between runs.
     requests_file: PathBuf,
+    /// Generated pictures attached to edit, kept apart from the cache, which drops a picture
+    /// with its generation.
+    kept_dir: PathBuf,
     remember: Sender<Requests>,
     probes: Sender<String>,
     images: Arc<ImageCache>,
@@ -104,12 +107,16 @@ impl Net {
         let client = Client::new(server);
         let dirs = rune::dirs::AppDirs::new("dev.mmh3.studio");
         let (cache, data) = match &dirs {
-            Some(d) => (d.cache().join("images"), d.data().join("requests")),
-            None => (std::env::temp_dir().join("mmh3-studio/images"), std::env::temp_dir().join("mmh3-studio/requests")),
+            Some(d) => (d.cache().to_owned(), d.data().to_owned()),
+            None => (std::env::temp_dir().join("mmh3-studio"), std::env::temp_dir().join("mmh3-studio")),
         };
+        let cache = cache.join("images");
         let folder = folder_for(client.base());
         let pictures = Arc::new(Pictures { dir: cache.join(&folder), queue: Mutex::default() });
-        let requests_file = data.join(format!("{folder}.json"));
+        let requests_file = data.join("requests").join(format!("{folder}.json"));
+        let kept_dir = data.join("references").join(&folder);
+        let (dir, file) = (kept_dir.clone(), requests_file.clone());
+        let _ = rune::task::spawn("mmh3-kept", move || prune_kept(&dir, &read_requests(&file)));
         let (remember, kept) = channel::<Requests>();
         let file = requests_file.clone();
         let _ = rune::task::serve("mmh3-requests", kept, move |requests| {
@@ -143,7 +150,7 @@ impl Net {
             });
             ControlFlow::Continue(())
         });
-        Net { handle, client, pictures, wake, requests_file, remember, probes, images }
+        Net { handle, client, pictures, wake, requests_file, kept_dir, remember, probes, images }
     }
 
     /// What the studio asked this server for in earlier runs, by the server's id.
@@ -158,6 +165,18 @@ impl Net {
             let thumb = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| thumb::reference(&bytes));
             let thumb = thumb.map(|t| images.rgba(t.width(), t.height(), t.into_raw()));
             h.update(move |s, _| s.reference_thumb(&path, thumb));
+        });
+    }
+
+    /// Copies generation `id`'s picture out of the cache and attaches the copy.
+    pub fn keep_for_editing(&self, id: &str, file: PathBuf) {
+        let (h, kept) = (self.handle.clone(), self.kept_dir.join(format!("{id}.png")));
+        let _ = rune::task::spawn("mmh3-keep", move || {
+            let answer = kept.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::copy(&file, &kept));
+            h.update(move |s, _| match answer {
+                Ok(_) => s.add_references(&[kept]),
+                Err(e) => s.note("Couldn't attach the picture.", Some(e.to_string()), true),
+            });
         });
     }
 
@@ -330,6 +349,18 @@ fn write_requests(file: &Path, requests: &Requests) -> std::io::Result<()> {
     std::fs::rename(part, file)
 }
 
+/// Removes kept pictures no remembered request edits any more. It runs as the studio starts,
+/// when the composer holds nothing.
+fn prune_kept(dir: &Path, requests: &Requests) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let used: HashSet<&Path> = requests.values().flat_map(|r| r.references.iter().map(PathBuf::as_path)).collect();
+    for entry in entries.flatten() {
+        if !used.contains(entry.path().as_path()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// One cache folder a server, since ids are only unique on the server that made them.
 fn folder_for(base: &str) -> String {
     let host = base.split("://").nth(1).unwrap_or(base);
@@ -396,6 +427,21 @@ mod tests {
         std::fs::write(&file, b"{not json").unwrap();
         assert!(read_requests(&file).is_empty());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn kept_pictures_go_once_no_remembered_request_edits_them() {
+        let dir = std::env::temp_dir().join(format!("mmh3-studio-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (used, unused) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&used, b"png").unwrap();
+        std::fs::write(&unused, b"png").unwrap();
+        let request =
+            ImageRequest { prompt: "<Picture 1> at night".into(), seed: 3, width: 64, height: 64, min_generation_area: None, references: vec![used.clone()] };
+        prune_kept(&dir, &[("g1".to_owned(), request)].into());
+        assert!(used.is_file());
+        assert!(!unused.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

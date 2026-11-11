@@ -773,12 +773,16 @@ impl State {
         self.prompt.insert(&picture_tag(n));
     }
 
-    /// Attaches a finished generation's picture, to edit it further.
+    /// Attaches a finished generation's picture, to edit it further. The picture is kept apart
+    /// from the generation's own file first, which goes when the generation does, so the edit
+    /// and a rerun of it still have it then.
     pub fn edit_picture(&mut self, id: &str) {
-        if let Some(file) = self.item(id).and_then(|g| g.file().cloned()) {
-            self.add_references(&[file]);
-            self.show_composer();
+        let Some(file) = self.item(id).and_then(|g| g.file().cloned()) else { return };
+        match &self.net {
+            Some(net) => net.keep_for_editing(id, file),
+            None => self.add_references(&[file]),
         }
+        self.show_composer();
     }
 
     /// Brings the composer into view, wide or compact.

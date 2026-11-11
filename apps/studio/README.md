@@ -64,7 +64,7 @@ What changes in a browser:
 
 - There is no file system. Each picture is fetched from the server when it is shown, and the browser decodes it off the main thread, so a 16 MP preview never holds up a frame. What the studio asked for is kept in the browser's local storage for that address.
 - **Save PNG** downloads the picture, and there is no **Reveal in Finder** or dragging out.
-- Add pictures to edit with **Add picture…** or by dropping them anywhere on the page. They are kept for as long as the page is open, so a re-run after a reload asks you to attach them again.
+- Add pictures to edit with **Add picture…** or by dropping them anywhere on the page. They are kept for as long as the page is open, as is a picture attached with **Edit this picture**, so a re-run after a reload asks you to attach them again.
 - In a window narrower than 720 points, such as a phone, the gallery, the picture and the composer take turns, under a switcher at the top.
 
 ## Using it
@@ -75,7 +75,7 @@ What changes in a browser:
 - **Status bar:** shows whether the server is connected, which models are resident, free and total memory, and the queue. On the right it shows the Mac's Energy Mode, its power source and any heat.
 - **Power banner:** macOS holds the GPU at a low clock in Low Power or Automatic Energy Mode (on a Mac that offers High Power Mode), on battery, on an adapter under 140 W with a Max chip, while the battery drains on the adapter, or when it reports a serious thermal state. A generation then often takes two to three times as long, so a banner above the status bar says why. **Open Energy settings** opens the Battery pane of System Settings, and **Copy command** copies `sudo pmset -a powermode 2`, which turns on High Power Mode; the studio never runs it itself. The studio reads `pmset` and `NSProcessInfo` every 30 seconds and when its window comes to the front, without root. Closing the banner keeps it closed until something else slows the GPU. The web build doesn't read the power state.
 
-What the studio asked each server for is kept in `~/Library/Application Support/dev.mmh3.studio/requests`, one file a server, and forgotten once the server no longer lists the generation. Generated PNGs go into the app's cache folder (`~/Library/Caches/dev.mmh3.studio/images`). Each PNG is downloaded once. Thumbnails are decoded off the UI thread and scaled down to 256 px. Only the selected image is kept at full resolution, and Rune decodes it with mipmaps on its own workers.
+What the studio asked each server for is kept in `~/Library/Application Support/dev.mmh3.studio/requests`, one file a server, and forgotten once the server no longer lists the generation. Generated PNGs go into the app's cache folder (`~/Library/Caches/dev.mmh3.studio/images`) and leave it with their generation. A generated picture attached with **Edit this picture** is copied to `~/Library/Application Support/dev.mmh3.studio/references` first, so the edit and its re-runs keep it, and the copy is removed at the next start once no remembered request uses it. Each PNG is downloaded once. Thumbnails are decoded off the UI thread and scaled down to 256 px. Only the selected image is kept at full resolution, and Rune decodes it with mipmaps on its own workers.
 
 ## Checks
 

@@ -90,6 +90,18 @@ impl Net {
         });
     }
 
+    /// Holds generation `id`'s picture in the page, as a picked one is held, and attaches it.
+    pub fn keep_for_editing(&self, id: &str, file: PathBuf) {
+        let (inner, id) = (self.inner.clone(), id.to_owned());
+        spawn_local(async move {
+            let answer = inner.blob(&file).await.map(|blob| inner.hold(&format!("mmh3-{id}.png"), blob));
+            inner.handle.update(move |s, _| match answer {
+                Ok(kept) => s.add_references(&[kept]),
+                Err(e) => s.note("Couldn't attach the picture.", Some(e.to_string()), true),
+            });
+        });
+    }
+
     /// Asks the server whether a generation the studio did not ask for writes a picture.
     pub fn probe(&self, id: String) {
         let inner = self.inner.clone();
@@ -281,6 +293,15 @@ impl Inner {
         let response = self.fetch("GET", &path.to_string_lossy(), None, None).await?;
         let blob = response.blob().map_err(|e| Error::Unreachable(js_error(&e)))?;
         Ok(JsFuture::from(blob).await.map_err(|e| Error::Unreachable(js_error(&e)))?.unchecked_into())
+    }
+
+    /// Keeps `blob` for this page under a name of its own; returns that name.
+    fn hold(&self, name: &str, blob: Blob) -> PathBuf {
+        let n = self.picked.get() + 1;
+        self.picked.set(n);
+        let path = Path::new(PICKED).join(n.to_string()).join(name);
+        self.files.borrow_mut().insert(path.clone(), blob);
+        path
     }
 
     async fn create_image(&self, request: &ImageRequest) -> Result<Generation, Error> {
@@ -484,11 +505,7 @@ fn add_files(inner: &Rc<Inner>, files: &FileList) {
             rejected += 1;
             continue;
         }
-        let n = inner.picked.get() + 1;
-        inner.picked.set(n);
-        let path = Path::new(PICKED).join(n.to_string()).join(&name);
-        inner.files.borrow_mut().insert(path.clone(), file.into());
-        paths.push(path);
+        paths.push(inner.hold(&name, file.into()));
     }
     inner.handle.update(move |s, _| {
         s.dropping = false;
