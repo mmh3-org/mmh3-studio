@@ -2,13 +2,16 @@
 //! through to it, so the page and the API share an origin and the browser needs no CORS. For
 //! local testing only; `tailscale serve` or any reverse proxy does the same for real use.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-/// Every request head line the proxy reads, at most; a browser's are far shorter.
+/// The longest request head the proxy reads; a browser's are far shorter.
 const MAX_HEAD: usize = 64 * 1024;
+/// How long a client may take to send its request's head.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Serves `dir` and passes `/v1/*` to `upstream` on `addr`; returns the address it listens on.
 pub fn spawn(addr: &str, dir: PathBuf, upstream: String) -> std::io::Result<SocketAddr> {
@@ -26,24 +29,49 @@ pub fn spawn(addr: &str, dir: PathBuf, upstream: String) -> std::io::Result<Sock
     Ok(bound)
 }
 
-fn handle(stream: TcpStream, dir: &Path, upstream: &str) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+enum Head {
+    Read(Vec<String>),
+    TooLarge,
+    Closed,
+}
+
+/// The request's head, up to and including its blank line, in at most [`MAX_HEAD`] bytes.
+fn read_head(reader: &mut BufReader<TcpStream>) -> std::io::Result<Head> {
     let mut head = Vec::new();
+    let mut left = MAX_HEAD as u64;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(());
+        let read = reader.by_ref().take(left).read_line(&mut line)?;
+        if read == 0 {
+            return Ok(if left == 0 { Head::TooLarge } else { Head::Closed });
+        }
+        left -= read as u64;
+        if !line.ends_with('\n') {
+            return Ok(if left == 0 { Head::TooLarge } else { Head::Closed });
         }
         let end = line.trim().is_empty();
         head.push(line);
-        if end || head.iter().map(String::len).sum::<usize>() > MAX_HEAD {
-            break;
+        if end {
+            return Ok(Head::Read(head));
         }
     }
+}
+
+fn handle(mut stream: TcpStream, dir: &Path, upstream: &str) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    stream.set_read_timeout(Some(HEAD_TIMEOUT))?;
+    let head = match read_head(&mut reader)? {
+        Head::Read(head) => head,
+        Head::TooLarge => {
+            return respond(&mut stream, "431 Request Header Fields Too Large", "text/plain", b"The request's head is too large.\n", false);
+        }
+        Head::Closed => return Ok(()),
+    };
+    // A request's body and an event stream may be slow by right; only the head has to be prompt.
+    stream.set_read_timeout(None)?;
     let mut request = head[0].split_whitespace();
     let (method, target) = (request.next().unwrap_or_default().to_owned(), request.next().unwrap_or_default().to_owned());
     let path = target.split(['?', '#']).next().unwrap_or_default();
-    let mut stream = stream;
     if path == "/v1" || path.starts_with("/v1/") {
         return pass(reader, stream, &head, upstream);
     }
@@ -125,8 +153,6 @@ fn pass(mut reader: BufReader<TcpStream>, mut client: TcpStream, head: &[String]
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::api::{Client, ImageRequest, State};
     use crate::mock::{self, Config};
@@ -156,6 +182,13 @@ mod tests {
         client.events(&created.id, |g| steps.push(g.state)).unwrap();
         assert_eq!(steps.last(), Some(&State::Done), "the event stream passes through to its end");
         assert!(client.image(&created.id).unwrap().starts_with(b"\x89PNG"));
+
+        let mut endless = TcpStream::connect(addr).unwrap();
+        let line = "GET /v1/status HTTP/1.1\r\nx-filler: ";
+        endless.write_all(format!("{line}{}", "a".repeat(MAX_HEAD - line.len())).as_bytes()).unwrap();
+        let mut answer = String::new();
+        endless.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 431 "), "a head that never ends is refused, not passed on: {answer}");
 
         let gone = Client::new(format!("http://{}", spawn("127.0.0.1:0", dir.clone(), "127.0.0.1:1".into()).unwrap()));
         assert!(gone.status().unwrap_err().is_unreachable(), "a stopped server reads as one");
