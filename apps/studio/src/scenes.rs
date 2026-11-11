@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use mmh3_studio::api::{Generation, Kind, Memory, State as Remote, Status, Timings};
+use mmh3_studio::api::{Generation, ImageRequest, Memory, State as Remote, Status};
 use mmh3_studio::mock::paint;
 
 use crate::state::{Conn, Gen, Phase, Picture, SizeChoice, State};
@@ -25,7 +25,7 @@ pub fn status(busy: bool, queued: u32) -> Status {
         generating: busy.then(|| "7c01aa2e0005".to_owned()),
         generations: 5,
         memory: Some(Memory { free: if busy { 61_400_000_000 } else { 84_100_000_000 }, total: 137_400_000_000 }),
-        models: (!busy).then(|| vec!["text_encoder".into(), "dit".into(), "image_vae".into()]),
+        models: (!busy).then(|| vec!["text_encoder".into(), "video_vae".into(), "dit".into()]),
         queued,
     }
 }
@@ -45,33 +45,26 @@ pub fn disconnected(s: &mut State) {
     s.conn = Conn::Disconnected("Connection refused (os error 61)".into());
 }
 
-fn remote(id: &str, prompt: &str, seed: u64, (width, height): (u32, u32), state: Remote) -> Generation {
-    Generation {
-        id: id.into(),
-        state,
-        queued: 1_794_393_000,
-        seconds: None,
-        step: None,
-        steps: None,
-        error: None,
-        kind: Kind::Image,
-        width: Some(width),
-        height: Some(height),
-        prompt: Some(prompt.into()),
-        seed: Some(seed),
-        timings: None,
-    }
+fn remote(id: &str, state: Remote) -> Generation {
+    Generation { error: None, id: id.into(), queued: 1_762_849_000, seconds: None, state, step: None, steps: None }
 }
 
-fn done(id: &str, prompt: &str, seed: u64, size: (u32, u32)) -> Generation {
-    let steps = vec![1.98, 1.97, 1.99, 1.97, 1.98, 1.96];
-    Generation { seconds: Some(14.62), timings: Some(Timings { text: 0.46, steps, decode: 2.31 }), ..remote(id, prompt, seed, size, Remote::Done) }
+/// What the studio remembers asking for `id`, which the server never repeats.
+fn asked(s: &mut State, id: &str, prompt: &str, seed: u64, (width, height): (u32, u32)) {
+    let r = ImageRequest { prompt: prompt.into(), seed, width, height, min_generation_area: None, references: Vec::new() };
+    s.requests.insert(id.into(), r);
+}
+
+fn done(s: &mut State, id: &str, prompt: &str, seed: u64, size: (u32, u32), seconds: f64) -> Generation {
+    asked(s, id, prompt, seed, size);
+    Generation { seconds: Some(seconds), ..remote(id, Remote::Done) }
 }
 
 /// Paints a fixture at a fraction of the generation's size, with a decoded thumbnail.
 fn picture(s: &mut State, id: &str, preview: bool) {
     let Some(g) = s.gens.iter().find(|g| g.id == id) else { return };
-    let (w, h, seed) = (g.width / 4, g.height / 4, g.seed);
+    let Some(((w, h), seed)) = g.size().zip(g.seed()) else { return };
+    let (w, h) = (w / 4, h / 4);
     let png = paint(w - w % 8, h - h % 8, seed);
     let thumb = mmh3_studio::thumb::thumbnail(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
     if let Some(t) = &thumb {
@@ -90,10 +83,10 @@ fn picture(s: &mut State, id: &str, preview: bool) {
 fn library(s: &mut State) {
     offline(s);
     let list = vec![
-        done("7c01aa2e0004", "Paper boats drifting across a rain puddle on cobblestones, reflections of neon signs", 912, (4736, 3552)),
-        done("7c01aa2e0003", "A lighthouse on a basalt cliff at dusk, long exposure, sea mist", 4127, (5472, 3072)),
-        done("7c01aa2e0002", "Isometric illustration of a tiny greenhouse full of succulents", 77, (2048, 2048)),
-        done("7c01aa2e0001", "Portrait of a red fox in fresh snow, shallow depth of field", 31_337, (3072, 5472)),
+        done(s, "7c01aa2e0004", "Paper boats drifting across a rain puddle on cobblestones, reflections of neon signs", 912, (4736, 3552), 236.4),
+        done(s, "7c01aa2e0003", "A lighthouse on a basalt cliff at dusk, long exposure, sea mist", 4127, (5472, 3072), 241.8),
+        done(s, "7c01aa2e0002", "Isometric illustration of a tiny greenhouse full of succulents", 77, (2048, 2048), 38.7),
+        done(s, "7c01aa2e0001", "Portrait of a red fox in fresh snow, shallow depth of field", 31_337, (3072, 5472), 239.1),
     ];
     s.merge(&list, 0.0);
     for id in ["7c01aa2e0004", "7c01aa2e0003", "7c01aa2e0002", "7c01aa2e0001"] {
@@ -104,13 +97,14 @@ fn library(s: &mut State) {
 pub fn running(s: &mut State) {
     s.conn = Conn::Connected(status(true, 1));
     library(s);
-    let mut running = remote("7c01aa2e0005", "A cathedral made of glass in a pine forest, morning fog, volumetric light", 2026, (4096, 4096), Remote::Running);
-    running.step = Some(3);
-    running.steps = Some(6);
-    let queued = remote("7c01aa2e0006", "Macro photograph of frost ferns on a window pane", 8, (2048, 2048), Remote::Queued);
-    let mut gens = vec![Gen::from_server(&queued, 0.0), Gen::from_server(&running, 0.0)];
+    asked(s, "7c01aa2e0005", "A cathedral made of glass in a pine forest, morning fog, volumetric light", 2026, (4096, 4096));
+    asked(s, "7c01aa2e0006", "Macro photograph of frost ferns on a window pane", 8, (2048, 2048));
+    let running = Generation { step: Some(2), steps: Some(6), ..remote("7c01aa2e0005", Remote::Running) };
+    let queued = remote("7c01aa2e0006", Remote::Queued);
+    let known = |s: &State, id: &str| s.requests.get(id).cloned();
+    let mut gens = vec![Gen::from_server(&queued, known(s, "7c01aa2e0006"), 0.0), Gen::from_server(&running, known(s, "7c01aa2e0005"), 0.0)];
     if let Phase::Running { since, .. } = &mut gens[1].phase {
-        *since = -7.4;
+        *since = -84.2;
     }
     gens.append(&mut s.gens);
     s.gens = gens;
@@ -129,9 +123,14 @@ pub fn gallery(s: &mut State) {
 pub fn failed(s: &mut State) {
     s.conn = Conn::Connected(status(false, 0));
     library(s);
-    let mut f = remote("7c01aa2e0007", "A city skyline made of stacked books", 5, (2048, 2048), Remote::Failed);
-    f.error = Some("The DiT ran out of memory at step 4 (requested 23.1 GB, 19.8 GB free).".into());
-    s.gens.insert(0, Gen::from_server(&f, 0.0));
+    asked(s, "7c01aa2e0007", "<Picture 1> as a city skyline made of stacked books", 5, (2048, 2048));
+    if let Some(r) = s.requests.get_mut("7c01aa2e0007") {
+        r.references.push(PathBuf::from("/Users/me/Desktop/skyline.heic"));
+    }
+    let error = "/Users/me/.cache/mmh3/jobs/7c01aa2e0007/picture-1.heic: The image format could not be determined";
+    let f = Generation { error: Some(error.into()), seconds: Some(0.4), ..remote("7c01aa2e0007", Remote::Failed) };
+    let request = s.requests.get("7c01aa2e0007").cloned();
+    s.gens.insert(0, Gen::from_server(&f, request, 0.0));
     s.selected = Some("7c01aa2e0007".into());
 }
 

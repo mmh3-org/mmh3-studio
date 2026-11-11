@@ -1,4 +1,4 @@
-use mmh3_studio::api::{self, Generation, Kind, Timings};
+use mmh3_studio::api::{self, Generation};
 
 use super::*;
 
@@ -9,40 +9,39 @@ fn online() -> State {
 }
 
 fn server(id: &str, state: api::State) -> Generation {
-    Generation {
-        id: id.into(),
-        state,
-        queued: 1,
-        seconds: None,
-        step: None,
-        steps: None,
-        error: None,
-        kind: Kind::Image,
-        width: Some(2048),
-        height: Some(2048),
-        prompt: Some("a fox".into()),
-        seed: Some(7),
-        timings: None,
-    }
+    Generation { error: None, id: id.into(), queued: 1, seconds: None, state, step: None, steps: None }
 }
 
 fn running(id: &str, step: u32) -> Generation {
     Generation { step: Some(step), steps: Some(6), ..server(id, api::State::Running) }
 }
 
+fn asked(prompt: &str) -> ImageRequest {
+    ImageRequest { prompt: prompt.into(), seed: 7, width: 2048, height: 2048, min_generation_area: None, references: Vec::new() }
+}
+
+/// A state that asked for each of `ids` itself.
+fn knowing(mut s: State, ids: &[&str]) -> State {
+    for id in ids {
+        s.requests.insert((*id).to_owned(), asked("a fox"));
+    }
+    s
+}
+
 #[test]
 fn running_keeps_the_time_it_started_and_done_asks_for_the_picture() {
     let mut phase = Phase::Queued;
-    assert!(step(&mut phase, &running("a", 1), 2.0).is_empty());
-    assert_eq!(phase, Phase::Running { step: 1, steps: 6, since: 2.0 });
+    assert!(step(&mut phase, &server("a", api::State::Running), 1.0).is_empty());
+    assert_eq!(phase, Phase::Running { step: None, steps: 6, since: 1.0 }, "running before the first step reads the prompt");
+    let _ = step(&mut phase, &running("a", 1), 2.0);
+    assert_eq!(phase, Phase::Running { step: Some(1), steps: 6, since: 1.0 });
     let _ = step(&mut phase, &running("a", 4), 5.0);
-    assert_eq!(phase, Phase::Running { step: 4, steps: 6, since: 2.0 });
+    assert_eq!(phase, Phase::Running { step: Some(4), steps: 6, since: 1.0 });
 
-    let t = Timings { text: 0.4, steps: vec![1.0; 6], decode: 2.0 };
-    let done = Generation { seconds: Some(8.4), timings: Some(t.clone()), ..server("a", api::State::Done) };
+    let done = Generation { seconds: Some(8.4), ..server("a", api::State::Done) };
     let fx: Vec<Effect> = step(&mut phase, &done, 9.0).into_iter().collect();
     assert_eq!(fx, [Effect::FetchImage]);
-    assert_eq!(phase, Phase::Done { seconds: 8.4, timings: Some(t) });
+    assert_eq!(phase, Phase::Done { seconds: 8.4 });
     assert!(step(&mut phase, &done, 9.5).is_empty(), "a repeated end asks for nothing");
 }
 
@@ -74,6 +73,7 @@ fn submitting_adds_a_selected_placeholder_that_takes_the_server_id() {
     assert_eq!(s.gens[0].id, "srv1");
     assert_eq!(s.gens[0].phase, Phase::Queued);
     assert_eq!(s.selected.as_deref(), Some("srv1"));
+    assert_eq!(s.requests.get("srv1").map(|r| r.prompt.as_str()), Some("a fox"), "the studio remembers what it asked for");
 }
 
 #[test]
@@ -87,22 +87,23 @@ fn a_refused_submission_fails_with_the_servers_words() {
 }
 
 #[test]
-fn merging_the_list_keeps_local_placeholders_and_drops_videos_and_vanished_items() {
-    let mut s = online();
+fn merging_the_list_keeps_local_placeholders_and_drops_what_the_studio_did_not_ask_for_and_vanished_items() {
+    let mut s = knowing(online(), &["a", "b"]);
     s.prompt.replace_text("pending");
     s.generate();
-    s.merge(&[running("b", 2), server("a", api::State::Done), Generation { kind: Kind::Video, ..server("v", api::State::Done) }], 3.0);
+    s.merge(&[running("b", 2), server("a", api::State::Done), server("v", api::State::Done)], 3.0);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["local-1", "b", "a"]);
     s.merge(&[running("b", 3)], 4.0);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["local-1", "b"]);
-    assert_eq!(s.gens[1].phase, Phase::Running { step: 3, steps: 6, since: 3.0 });
+    assert_eq!(s.gens[1].phase, Phase::Running { step: Some(3), steps: 6, since: 3.0 });
+    assert!(!s.requests.contains_key("a"), "what the server forgot, the studio forgets");
 }
 
 #[test]
 fn a_running_generation_is_not_deleted() {
-    let mut s = State::offline();
+    let mut s = knowing(State::offline(), &["a", "b"]);
     s.merge(&[running("b", 2), server("a", api::State::Done)], 0.0);
     s.delete("b");
     assert_eq!(s.gens.len(), 2);
@@ -112,7 +113,7 @@ fn a_running_generation_is_not_deleted() {
 
 #[test]
 fn deleting_asks_first_and_cancelling_keeps_the_generation() {
-    let mut s = State::offline();
+    let mut s = knowing(State::offline(), &["a"]);
     s.merge(&[server("a", api::State::Done)], 0.0);
     s.delete("a");
     assert_eq!(s.deleting.as_deref(), Some("a"));
@@ -140,7 +141,7 @@ fn a_failed_placeholder_that_never_reached_the_server_goes_at_once() {
 
 #[test]
 fn generating_while_disconnected_adds_nothing_and_says_why() {
-    let mut s = State::offline();
+    let mut s = knowing(State::offline(), &["a"]);
     s.conn = Conn::Disconnected("refused".into());
     s.prompt.replace_text("a fox");
     s.generate();
@@ -158,12 +159,14 @@ fn a_list_that_lands_before_the_submit_answer_leaves_one_row() {
     s.generate();
     let local = s.gens[0].id.clone();
     s.merge(&[running("srv1", 1)], 1.0);
-    assert_eq!(s.gens.len(), 2);
+    assert_eq!(s.gens.len(), 1, "a generation the studio has not heard it asked for waits for the answer");
     s.submitted(&local, Ok(server("srv1", api::State::Queued)), 1.5);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["srv1"]);
     assert_eq!(s.selected.as_deref(), Some("srv1"));
-    assert_eq!(s.gens[0].phase, Phase::Running { step: 1, steps: 6, since: 1.0 }, "the newer state is kept");
+    assert_eq!(s.gens[0].prompt(), "a fox");
+    s.merge(&[running("srv1", 2)], 2.0);
+    assert_eq!(s.gens[0].phase, Phase::Running { step: Some(2), steps: 6, since: 2.0 });
 }
 
 #[test]

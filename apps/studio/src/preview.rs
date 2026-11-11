@@ -1,12 +1,11 @@
 use std::fmt::Write as _;
 
-use mmh3_studio::api::Timings;
 use mmh3_studio::sizes::megapixels;
-use rune::{Color, Cx, El, col, el, icon, row, text};
+use rune::{Cx, El, col, el, icon, row, text};
 use rune_kit::image_zoom::Stage;
 use rune_kit::{Button, ButtonVariant, Kit, Progress, Spinner};
 
-use crate::gallery::elapsed;
+use crate::gallery::{elapsed, stage};
 use crate::icons;
 use crate::state::{Conn, Gen, Phase, Picture, State};
 
@@ -148,62 +147,38 @@ fn caption(label: &str, value: String, k: &Kit) -> El {
     col().gap(2.0).child(text(label.to_owned()).font(k.ty.small).color(k.c.text_faint)).child(text(value).font(k.ty.ui_medium).color(k.c.text_base))
 }
 
-fn facts(g: &Gen, k: &Kit) -> El {
-    row()
-        .key("facts")
-        .gap(24.0)
-        .flex_wrap()
-        .child(caption("Size", format!("{} × {} · {:.1} MP", g.width, g.height, megapixels(g.width, g.height)), k))
-        .child(caption("Seed", g.seed.to_string(), k))
+/// What the studio knows of a generation: what it asked for, and how long the server says it
+/// took. The server times the whole generation, not its stages.
+fn facts(s: &State, g: &Gen, k: &Kit) -> El {
+    let mut facts = row().key("facts").gap(24.0).flex_wrap();
+    let decoded = s.preview.as_ref().filter(|(id, _)| *id == g.id).and_then(|(_, img)| img.size());
+    if let Some((w, h)) = g.size().or(decoded.map(|[w, h]| (w, h))) {
+        facts = facts.child(caption("Size", format!("{w} × {h} · {:.1} MP", megapixels(w, h)), k));
+    }
+    if let Some(seed) = g.seed() {
+        facts = facts.child(caption("Seed", seed.to_string(), k));
+    }
+    match g.references().len() {
+        0 => {}
+        1 => facts = facts.child(caption("Edits", "1 picture".into(), k)),
+        n => facts = facts.child(caption("Edits", format!("{n} pictures"), k)),
+    }
+    if let Phase::Done { seconds } = g.phase {
+        facts = facts.child(caption("Took", format!("{seconds:.1} s · {} steps", mmh3_studio::api::IMAGE_STEPS), k).key("took"));
+    }
+    if g.request.is_none() {
+        facts = facts.child(caption("Prompt", "Asked for outside the studio".into(), k));
+    }
+    facts
 }
 
-/// One bar a stage, as wide as its share of the time it took.
-fn timeline(t: &Timings, total: f64, k: &Kit, dark: bool) -> El {
-    let seg = |key: String, seconds: f64, colour: Color| el().key(key).h(8.0).grow(seconds.max(0.001) as f32).radius(2.0).fill(colour);
-    let mut bar =
-        row().key("timeline").role("img").label(format!("Text {:.2} s, steps {:.2} s, decode {:.2} s", t.text, t.steps_total(), t.decode)).w_full().gap(2.0);
-    bar = bar.child(seg("t-text".into(), t.text, rune::tok::accent(2, dark)));
-    for (i, s) in t.steps.iter().enumerate() {
-        bar = bar.child(seg(format!("t-step-{i}"), *s, rune::tok::accent(0, dark)));
-    }
-    bar = bar.child(seg("t-decode".into(), t.decode, rune::tok::accent(4, dark)));
-    let legend = |label: &str, value: String, colour: Color| {
-        row()
-            .gap(6.0)
-            .center_y()
-            .child(el().size(8.0, 8.0).radius(2.0).fill(colour).a11y_hidden())
-            .child(text(format!("{label} {value}")).font(k.ty.small).color(k.c.text_muted))
-    };
-    let steps = t.steps.len().max(1);
-    col().key("timings").w_full().gap(8.0).child(bar).child(
-        row()
-            .key("legend")
-            .w_full()
-            .gap(16.0)
-            .flex_wrap()
-            .child(legend("Text encoder", format!("{:.2} s", t.text), rune::tok::accent(2, dark)))
-            .child(legend(
-                &format!("{steps} steps"),
-                format!("{:.2} s ({:.2} s each)", t.steps_total(), t.steps_total() / steps as f64),
-                rune::tok::accent(0, dark),
-            ))
-            .child(legend("VAE decode", format!("{:.2} s", t.decode), rune::tok::accent(4, dark)))
-            .child(text(format!("Total {total:.2} s")).key("total").font(k.ty.small_medium).color(k.c.text_base)),
-    )
-}
-
-fn footer(g: &Gen, k: &Kit, dark: bool) -> El {
-    let mut f = col().key("details").w_full().px(20.0).py(14.0).gap(12.0).border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted).child(facts(g, k));
-    if let Phase::Done { seconds, timings: Some(t) } = &g.phase {
-        f = f.child(timeline(t, seconds.max(t.total()), k, dark));
-    } else if let Phase::Done { seconds, timings: None } = &g.phase {
-        f = f.child(text(format!("Took {seconds:.2} s")).font(k.ty.small).color(k.c.text_muted));
-    }
-    f
+fn footer(s: &State, g: &Gen, k: &Kit) -> El {
+    col().key("details").w_full().px(20.0).py(14.0).gap(12.0).border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted).child(facts(s, g, k))
 }
 
 fn placeholder(g: &Gen, k: &Kit, content: El) -> El {
-    let ratio = g.width.max(1) as f32 / g.height.max(1) as f32;
+    let (w, h) = g.size().unwrap_or((1, 1));
+    let ratio = w.max(1) as f32 / h.max(1) as f32;
     let frame = col().key("frame").aspect_fit(ratio).radius(10.0).fill(k.c.layer_02).border(1.0, k.c.border_base).center().padding(24.0).child(content);
     col()
         .key("canvas")
@@ -224,7 +199,9 @@ fn progress(s: &State, g: &Gen, k: &Kit) -> El {
             ("Waiting in the queue".to_owned(), if ahead > 0 { format!("{ahead} ahead of it") } else { String::new() }, None)
         }
         Phase::Running { step, steps, since } => {
-            (format!("Step {step} of {steps}"), format!("{} elapsed", elapsed(*since, s.clock)), Some(*step as f32 / (*steps).max(1) as f32))
+            let (headline, value) = stage(g, *step, *steps);
+            let value = step.filter(|k| k < steps).map(|_| value);
+            (headline, format!("{} elapsed", elapsed(*since, s.clock)), value)
         }
         _ => (String::new(), String::new(), None),
     };
@@ -240,7 +217,7 @@ fn progress(s: &State, g: &Gen, k: &Kit) -> El {
         .gap(8.0)
         .child(bar)
         .child(text(detail).key("progress-detail").font(k.ty.small).color(c.text_muted))
-        .child(text(g.prompt.clone()).font(k.ty.small).color(c.text_faint).max_lines(3).wrap());
+        .child(text(g.prompt().to_owned()).font(k.ty.small).color(c.text_faint).max_lines(3).wrap());
     placeholder(g, k, card)
 }
 
@@ -273,12 +250,16 @@ fn image(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
     let ready = s.preview.as_ref().filter(|(id, _)| *id == g.id).map(|(_, img)| img).filter(|img| img.is_ready());
     match ready {
         Some(img) if img.error().is_none() => {
-            let [w, h] = img.size().unwrap_or([g.width, g.height]);
+            let [w, h] = img.size().unwrap_or([1, 1]);
             let size = cx.layout_size("artifact-stage").unwrap_or([800.0, 600.0]);
-            Stage::new(|s: &mut State| &mut s.stage, [w as f32, h as f32], el().key("preview-image").role("img").label(g.prompt.clone()).pixels(img.pixels()))
-                .icons(&icons::ZOOM_IN, &icons::ZOOM_OUT, &icons::FIT)
-                .labels("Zoom in", "Zoom out", "Fit", "Zoom controls")
-                .build(&s.stage, k, size)
+            Stage::new(
+                |s: &mut State| &mut s.stage,
+                [w as f32, h as f32],
+                el().key("preview-image").role("img").label(crate::gallery::title(g)).pixels(img.pixels()),
+            )
+            .icons(&icons::ZOOM_IN, &icons::ZOOM_OUT, &icons::FIT)
+            .labels("Zoom in", "Zoom out", "Fit", "Zoom controls")
+            .build(&s.stage, k, size)
         }
         Some(img) => placeholder(g, k, text(format!("Couldn't show the image: {:?}", img.error())).font(k.ty.ui).color(k.c.danger.fg).wrap()),
         None => {
@@ -301,11 +282,10 @@ fn image(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
 }
 
 fn generation(s: &State, g: &Gen, k: &Kit, cx: &mut Cx<State>) -> El {
-    let dark = cx.system_dark();
     let canvas = match &g.phase {
         Phase::Done { .. } => image(s, g, k, cx),
         Phase::Failed(why) => failed(s, g, why, k),
         _ => progress(s, g, k),
     };
-    col().key("generation").w_full().grow(1.0).min_h(0.0).child(canvas).child(footer(g, k, dark))
+    col().key("generation").w_full().grow(1.0).min_h(0.0).child(canvas).child(footer(s, g, k))
 }

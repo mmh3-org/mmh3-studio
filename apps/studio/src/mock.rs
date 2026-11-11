@@ -1,22 +1,34 @@
-//! A stand-in for `mmh3 server` in image mode: the same routes and JSON, six timed steps, and a
-//! painted PNG of the requested size, so the studio can be exercised without the engine.
+//! A stand-in for `mmh3 server`, so the studio can be exercised without the engine. It answers
+//! the routes of mmh3's `src/server.rs` with the same JSON, status codes and event stream. A
+//! picture takes six timed steps and is a painted PNG of the requested size; its fields are
+//! checked as `mmh3 image` checks them, so a bad value fails the generation rather than the
+//! request. A video is there only so that a client meets one: it takes its steps and writes
+//! nothing worth watching.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::api::{Generation, IMAGE_STEPS, Kind, Memory, State, Status, Timings};
-use crate::sizes;
+use crate::api::{Generation, Generations, IMAGE_STEPS, MAX_REFERENCES, Memory, Refusal, State, Status};
 
-const MODELS: [&str; 3] = ["text_encoder", "dit", "image_vae"];
-const FIELDS: [&str; 7] = ["image", "prompt", "seed", "width", "height", "min-generation-area", "steps"];
+/// What the server keeps after a picture: its text encoder, and its transformer and picture
+/// decoder in the tables of the video ones.
+const KEPT: [&str; 3] = ["text_encoder", "video_vae", "dit"];
+const IMAGE_OPTIONS: [&str; 8] = ["prompt", "prompt-file", "reference", "width", "height", "min-generation-area", "seed", "attention-precision"];
+const IMAGE_FILE_OPTIONS: [&str; 2] = ["prompt-file", "reference"];
+const MACHINE_OPTIONS: [&str; 10] = ["models", "dit", "text-encoder", "video-vae", "audio-vae", "devices", "vram-budget", "worker", "worker-units", "token"];
+const VIDEO_FILE_OPTIONS: [&str; 7] = ["prompt-file", "context", "first-frame", "last-frame", "reference", "reference-audio", "reference-video"];
 const TOTAL_MEMORY: u64 = 128 << 30;
-const MAX_BODY: usize = 1 << 20;
+const MAX_BODY: usize = 1 << 30;
+const KEEP_ALIVE: Duration = Duration::from_secs(15);
+const CANVAS_MULTIPLE: usize = 32;
+const DEFAULT_SIDE: usize = 2048;
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Reading the prompt and the references, before the first step.
     pub text: Duration,
     pub step: Duration,
     pub decode: Duration,
@@ -28,17 +40,62 @@ impl Default for Config {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Video,
+    Picture,
+}
+
+/// One field of a request's form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub name: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+impl Field {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
 struct Job {
-    generation: Generation,
-    png: Option<Arc<Vec<u8>>>,
-    /// Every step and the end, so a slow event stream still sends each one, as the server does.
-    events: Vec<Generation>,
+    id: String,
+    output: Output,
+    state: State,
+    queued: SystemTime,
+    seconds: Option<f64>,
+    step: Option<u32>,
+    steps: Option<u32>,
+    failure: Option<String>,
+    fields: Vec<Field>,
+    written: Option<Arc<Vec<u8>>>,
+    /// Every description the job has had, so a stream says each change however slowly it reads.
+    said: Vec<Generation>,
+}
+
+impl Job {
+    fn describe(&self) -> Generation {
+        let running = self.state == State::Running;
+        Generation {
+            error: self.failure.clone(),
+            id: self.id.clone(),
+            queued: self.queued.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            seconds: self.seconds,
+            state: self.state,
+            step: if running { self.step } else { None },
+            steps: if running { self.steps } else { None },
+        }
+    }
 }
 
 #[derive(Default)]
 struct Jobs {
     list: Vec<Job>,
-    next: u64,
+    waiting: VecDeque<String>,
+    count: u64,
+    kept: bool,
 }
 
 struct Shared {
@@ -46,6 +103,7 @@ struct Shared {
     queued: Condvar,
     changed: Condvar,
     config: Config,
+    started: u64,
 }
 
 impl Shared {
@@ -54,11 +112,11 @@ impl Shared {
     }
 
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
-        if let Some(job) = self.lock().list.iter_mut().find(|j| j.generation.id == id) {
+        if let Some(job) = self.lock().list.iter_mut().find(|j| j.id == id) {
             f(job);
-            let g = &job.generation;
-            if g.is_finished() || (g.state == State::Running && g.step.is_some()) {
-                job.events.push(g.clone());
+            let now = job.describe();
+            if job.said.last() != Some(&now) {
+                job.said.push(now);
             }
         }
         self.changed.notify_all();
@@ -69,7 +127,8 @@ impl Shared {
 pub fn spawn(addr: &str, config: Config) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
-    let shared = Arc::new(Shared { jobs: Mutex::new(Jobs::default()), queued: Condvar::new(), changed: Condvar::new(), config });
+    let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let shared = Arc::new(Shared { jobs: Mutex::new(Jobs::default()), queued: Condvar::new(), changed: Condvar::new(), config, started });
     let worker = shared.clone();
     std::thread::Builder::new().name("mock-worker".into()).spawn(move || work(&worker))?;
     std::thread::Builder::new().name("mock-accept".into()).spawn(move || {
@@ -83,58 +142,106 @@ pub fn spawn(addr: &str, config: Config) -> std::io::Result<SocketAddr> {
     Ok(bound)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 fn work(shared: &Shared) {
     loop {
-        let (id, prompt, seed, width, height) = {
+        let (id, output, fields) = {
             let mut jobs = shared.lock();
-            loop {
-                if let Some(job) = jobs.list.iter_mut().find(|j| j.generation.state == State::Queued) {
-                    let g = &mut job.generation;
-                    g.state = State::Running;
-                    g.steps = Some(IMAGE_STEPS);
-                    break (g.id.clone(), g.prompt.clone().unwrap_or_default(), g.seed.unwrap_or(0), g.width.unwrap_or(256), g.height.unwrap_or(256));
+            let id = loop {
+                if let Some(id) = jobs.waiting.pop_front() {
+                    break id;
                 }
                 jobs = shared.queued.wait(jobs).unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
+            };
+            let Some(job) = jobs.list.iter().find(|j| j.id == id) else { continue };
+            (id, job.output, job.fields.clone())
         };
         let started = Instant::now();
-        let timed = |d: Duration| {
-            let t = Instant::now();
-            std::thread::sleep(d);
-            t.elapsed().as_secs_f64()
+        shared.update(&id, |j| j.state = State::Running);
+        let ended = match output {
+            Output::Picture => picture(shared, &id, &fields),
+            Output::Video => video(shared, &id, &fields),
         };
-        let text = timed(shared.config.text);
-        let mut steps = Vec::new();
-        for k in 1..=IMAGE_STEPS {
-            steps.push(timed(shared.config.step));
-            shared.update(&id, |j| j.generation.step = Some(k));
-        }
-        if prompt.contains("[fail]") {
-            shared.update(&id, |j| finish(&mut j.generation, State::Failed, started, None, Some("The mock server was asked to fail.".into())));
-            continue;
-        }
-        let t = Instant::now();
-        let png = paint(width, height, seed);
-        std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
-        let decode = t.elapsed().as_secs_f64();
+        shared.lock().kept = true;
         shared.update(&id, |j| {
-            j.png = Some(Arc::new(png));
-            finish(&mut j.generation, State::Done, started, Some(Timings { text, steps, decode }), None);
+            j.seconds = Some(started.elapsed().as_secs_f64());
+            match ended {
+                Ok(written) => {
+                    j.state = State::Done;
+                    j.written = Some(Arc::new(written));
+                }
+                Err(why) => {
+                    j.state = State::Failed;
+                    j.failure = Some(why);
+                }
+            }
         });
     }
 }
 
-fn finish(g: &mut Generation, state: State, started: Instant, timings: Option<Timings>, error: Option<String>) {
-    g.state = state;
-    g.step = None;
-    g.steps = None;
-    g.seconds = Some((started.elapsed().as_secs_f64() * 100.0).round() / 100.0);
-    g.timings = timings;
-    g.error = error;
+fn steps(shared: &Shared, id: &str, steps: u32) {
+    for k in 1..=steps {
+        std::thread::sleep(shared.config.step);
+        shared.update(id, |j| {
+            j.step = Some(k);
+            j.steps = Some(steps);
+        });
+    }
+}
+
+/// `option_number` of mmh3's command line.
+fn number(fields: &[Field], name: &str, default: usize) -> Result<usize, String> {
+    match fields.iter().rev().find(|f| f.name == name) {
+        Some(f) => f.text().replace('_', "").parse().map_err(|_| format!("--{name} must be a number")),
+        None => Ok(default),
+    }
+}
+
+/// What `mmh3 image` would make of the fields, in the order it checks them.
+fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
+    let width = number(fields, "width", DEFAULT_SIDE)?;
+    let height = number(fields, "height", DEFAULT_SIDE)?;
+    let min_area = number(fields, "min-generation-area", DEFAULT_SIDE * DEFAULT_SIDE)?;
+    let seed = number(fields, "seed", 0)? as u64;
+    if width < CANVAS_MULTIPLE || height < CANVAS_MULTIPLE {
+        return Err(format!("--width and --height must be at least {CANVAS_MULTIPLE}"));
+    }
+    if !(1024..=16_777_216).contains(&min_area) {
+        return Err("--min-generation-area must be from 1024 to 16777216".into());
+    }
+    let has = |name: &str| fields.iter().any(|f| f.name == name);
+    let prompt = match (has("prompt"), has("prompt-file")) {
+        (true, true) => return Err("pass either --prompt or --prompt-file".into()),
+        (false, false) => return Err("pass a prompt or --context, not both".into()),
+        _ => fields.iter().rev().find(|f| f.name == "prompt" || f.name == "prompt-file").map(Field::text).unwrap_or_default(),
+    };
+    let references: Vec<&Field> = fields.iter().filter(|f| f.name == "reference").collect();
+    for r in &references {
+        let name = r.filename.as_deref().unwrap_or_default();
+        let picture = image::load_from_memory(&r.bytes).map_err(|e| format!("{name}: {e}"))?;
+        if picture.width().min(picture.height()) < CANVAS_MULTIPLE as u32 {
+            return Err(format!("{name}: a reference needs at least {CANVAS_MULTIPLE} pixels on each side, not {}×{}", picture.width(), picture.height()));
+        }
+    }
+    if references.len() > MAX_REFERENCES {
+        return Err(format!("pass at most {MAX_REFERENCES} --reference pictures"));
+    }
+    std::thread::sleep(shared.config.text);
+    steps(shared, id, IMAGE_STEPS);
+    if prompt.contains("[fail]") {
+        return Err("The mock server was asked to fail.".into());
+    }
+    let t = Instant::now();
+    let png = paint(width as u32, height as u32, seed);
+    std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
+    Ok(png)
+}
+
+fn video(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
+    let n = number(fields, "steps", 8)? as u32;
+    std::thread::sleep(shared.config.text);
+    steps(shared, id, n);
+    std::thread::sleep(shared.config.decode);
+    Ok(b"not really an mp4".to_vec())
 }
 
 /// A seed-coloured diagonal gradient with rings, so each generation looks different.
@@ -205,32 +312,38 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Request> {
             }
         }
     }
-    let mut body = vec![0; length.min(MAX_BODY)];
-    reader.read_exact(&mut body)?;
+    let mut body = Vec::new();
+    reader.take(length.min(MAX_BODY) as u64).read_to_end(&mut body)?;
     Ok(Request { method, path, content_type, body })
 }
 
-fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+fn respond(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         409 => "Conflict",
-        _ => "Error",
+        _ => "Internal Server Error",
     };
-    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
+    write!(stream, "HTTP/1.1 {status} {reason}\r\n")?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "content-length: {}\r\nconnection: close\r\n\r\n", body.len())?;
     stream.write_all(body)?;
     stream.flush()
 }
 
 fn json(stream: &mut TcpStream, status: u16, value: &impl serde::Serialize) -> std::io::Result<()> {
-    respond(stream, status, "application/json", &serde_json::to_vec(value).unwrap_or_default())
+    respond(stream, status, &[("content-type", "application/json")], &serde_json::to_vec(value).unwrap_or_default())
 }
 
-fn text(stream: &mut TcpStream, status: u16, message: &str) -> std::io::Result<()> {
-    respond(stream, status, "text/plain; charset=utf-8", message.as_bytes())
+/// How the server answers when it does not answer with what was asked for.
+fn refuse(stream: &mut TcpStream, status: u16, message: &str) -> std::io::Result<()> {
+    json(stream, status, &Refusal { error: message.to_owned() })
 }
 
 fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
@@ -238,134 +351,178 @@ fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
     let request = read_request(&mut reader)?;
     let mut stream = stream;
     let segments: Vec<&str> = request.path.trim_matches('/').split('/').collect();
-    match (request.method.as_str(), segments.as_slice()) {
+    let method = request.method.as_str();
+    match (method, segments.as_slice()) {
         ("GET", ["v1", "status"]) => json(&mut stream, 200, &status(shared)),
         ("GET", ["v1", "generations"]) => {
-            let list: Vec<Generation> = shared.lock().list.iter().rev().map(|j| j.generation.clone()).collect();
-            json(&mut stream, 200, &list)
+            let mut jobs: Vec<(SystemTime, Generation)> = shared.lock().list.iter().map(|j| (j.queued, j.describe())).collect();
+            jobs.sort_by(|(a, _), (b, _)| b.cmp(a));
+            json(&mut stream, 200, &Generations { generations: jobs.into_iter().map(|(_, g)| g).collect() })
         }
-        ("POST", ["v1", "generations"]) => match create(shared, &request) {
-            Ok(g) => json(&mut stream, 202, &g),
-            Err(why) => text(&mut stream, 400, &why),
-        },
+        ("POST", ["v1", "generations"]) => create(&mut stream, shared, &request, Output::Video),
+        ("POST", ["v1", "images"]) => create(&mut stream, shared, &request, Output::Picture),
         ("GET", ["v1", "generations", id]) => match find(shared, id) {
             Some(g) => json(&mut stream, 200, &g),
-            None => text(&mut stream, 404, "no such generation"),
+            None => refuse(&mut stream, 404, "no such generation"),
         },
         ("DELETE", ["v1", "generations", id]) => {
             let mut jobs = shared.lock();
-            match jobs.list.iter().position(|j| j.generation.id == *id) {
-                None => text(&mut stream, 404, "no such generation"),
-                Some(i) if jobs.list[i].generation.state == State::Running => text(&mut stream, 409, "the generation is running"),
+            match jobs.list.iter().position(|j| j.id == *id) {
+                None => refuse(&mut stream, 404, "no such generation"),
+                Some(i) if jobs.list[i].state == State::Running => refuse(&mut stream, 409, "that generation is running"),
                 Some(i) => {
                     jobs.list.remove(i);
+                    jobs.waiting.retain(|w| w != id);
                     drop(jobs);
                     shared.changed.notify_all();
-                    respond(&mut stream, 204, "text/plain", b"")
+                    respond(&mut stream, 204, &[], b"")
                 }
             }
         }
-        ("GET", ["v1", "generations", id, "image"]) => {
-            let found = shared.lock().list.iter().find(|j| j.generation.id == *id).map(|j| j.png.clone());
-            match found {
-                None => text(&mut stream, 404, "no such generation"),
-                Some(Some(png)) => respond(&mut stream, 200, "image/png", &png),
-                Some(None) => text(&mut stream, 409, "the generation is not done"),
-            }
-        }
-        ("GET", ["v1", "generations", _, "video"]) => text(&mut stream, 404, "this server makes images"),
+        ("GET", ["v1", "generations", id, "image"]) => written(&mut stream, shared, id, Output::Picture),
+        ("GET", ["v1", "generations", id, "video"]) => written(&mut stream, shared, id, Output::Video),
         ("GET", ["v1", "generations", id, "events"]) => events(stream, shared, id),
-        _ => text(&mut stream, 404, "no such route"),
+        (_, ["v1", "status" | "images"] | ["v1", "generations", ..]) if segments.len() <= 4 => respond(&mut stream, 405, &[], b""),
+        _ => respond(&mut stream, 404, &[], b""),
     }
 }
 
 fn find(shared: &Shared, id: &str) -> Option<Generation> {
-    shared.lock().list.iter().find(|j| j.generation.id == id).map(|j| j.generation.clone())
+    shared.lock().list.iter().find(|j| j.id == id).map(Job::describe)
+}
+
+fn written(stream: &mut TcpStream, shared: &Shared, id: &str, wanted: Output) -> std::io::Result<()> {
+    let found = shared.lock().list.iter().find(|j| j.id == id).map(|j| (j.output, j.state, j.written.clone()));
+    match found {
+        None => refuse(stream, 404, "no such generation"),
+        Some((Output::Video, ..)) if wanted == Output::Picture => refuse(stream, 404, "that generation writes a video"),
+        Some((Output::Picture, ..)) if wanted == Output::Video => refuse(stream, 404, "that generation writes a picture"),
+        Some((output, State::Done, Some(bytes))) => {
+            let kind = if output == Output::Picture { "image/png" } else { "video/mp4" };
+            respond(stream, 200, &[("content-type", kind)], &bytes)
+        }
+        Some((_, State::Failed, _)) => refuse(stream, 409, "that generation failed"),
+        Some(_) => refuse(stream, 409, "that generation has not written anything yet"),
+    }
 }
 
 fn status(shared: &Shared) -> Status {
     let jobs = shared.lock();
-    let running = jobs.list.iter().find(|j| j.generation.state == State::Running);
+    let running = jobs.list.iter().find(|j| j.state == State::Running);
     let busy = running.is_some();
     Status {
-        generating: running.map(|j| j.generation.id.clone()),
+        generating: running.map(|j| j.id.clone()),
         generations: jobs.list.len() as u32,
         memory: Some(Memory { free: TOTAL_MEMORY - (38 << 30) - if busy { 21 << 30 } else { 0 }, total: TOTAL_MEMORY }),
-        models: (!busy).then(|| MODELS.iter().map(|m| (*m).to_owned()).collect()),
-        queued: jobs.list.iter().filter(|j| j.generation.state == State::Queued).count() as u32,
+        models: (!busy).then(|| if jobs.kept { KEPT.iter().map(|m| (*m).to_owned()).collect() } else { Vec::new() }),
+        queued: jobs.list.iter().filter(|j| j.state == State::Queued).count() as u32,
     }
 }
 
-fn create(shared: &Shared, request: &Request) -> Result<Generation, String> {
-    let boundary = request.content_type.split("boundary=").nth(1).ok_or("expected multipart/form-data")?.trim_matches('"');
-    let fields = parse_multipart(&request.body, boundary);
-    if let Some(unknown) = fields.keys().find(|k| !FIELDS.contains(&k.as_str())) {
-        return Err(format!("unknown field: {unknown}"));
-    }
-    let prompt = fields.get("prompt").filter(|p| !p.trim().is_empty()).ok_or("prompt is required")?.clone();
-    let seed = fields.get("seed").map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| "seed must be a whole number".to_owned()))?;
-    let side = |name: &str| -> Result<u32, String> {
-        let raw = fields.get(name).map_or("1024", String::as_str);
-        sizes::side(raw).map_err(|e| format!("{name}: {e}"))
+/// Why the server would refuse field `name`, as `image_field_kind` and `field_kind` say.
+fn refused(output: Output, field: &Field) -> Option<String> {
+    let name = field.name.as_str();
+    let file = match output {
+        Output::Picture if !IMAGE_OPTIONS.contains(&name) => return Some(format!("{name} is not an option of a picture")),
+        Output::Picture => IMAGE_FILE_OPTIONS.contains(&name),
+        Output::Video if MACHINE_OPTIONS.contains(&name) => return Some(format!("{name} is the server's to set, not a request's")),
+        Output::Video => VIDEO_FILE_OPTIONS.contains(&name),
     };
-    let (width, height) = (side("width")?, side("height")?);
+    match (file, &field.filename) {
+        (true, None) => Some(format!("{name} takes an uploaded file")),
+        (false, Some(_)) => Some(format!("{name} takes text, not a file")),
+        (true, Some(f)) if f.is_empty() || f.starts_with('.') => Some("a file name that names no file".into()),
+        _ => None,
+    }
+}
+
+fn create(stream: &mut TcpStream, shared: &Shared, request: &Request, output: Output) -> std::io::Result<()> {
+    let Some(boundary) = request.content_type.split("boundary=").nth(1).map(|b| b.trim_matches('"')) else {
+        return refuse(stream, 400, "Invalid `boundary` for `multipart/form-data` request");
+    };
+    let fields = parse_multipart(&request.body, boundary);
+    if let Some(why) = fields.iter().find_map(|f| refused(output, f)) {
+        return refuse(stream, 400, &why);
+    }
     let mut jobs = shared.lock();
-    jobs.next += 1;
-    let generation = Generation {
-        id: format!("{:08x}{:04x}", (now_secs() as u32).wrapping_mul(2_654_435_761), jobs.next),
+    let id = format!("{:x}{:04x}", shared.started, jobs.count & 0xffff);
+    jobs.count += 1;
+    let mut job = Job {
+        id: id.clone(),
+        output,
         state: State::Queued,
-        queued: now_secs(),
+        queued: SystemTime::now(),
         seconds: None,
         step: None,
         steps: None,
-        error: None,
-        kind: Kind::Image,
-        width: Some(width),
-        height: Some(height),
-        prompt: Some(prompt),
-        seed: Some(seed),
-        timings: None,
+        failure: None,
+        fields,
+        written: None,
+        said: Vec::new(),
     };
-    jobs.list.push(Job { generation: generation.clone(), png: None, events: Vec::new() });
+    let described = job.describe();
+    job.said.push(described.clone());
+    jobs.list.push(job);
+    jobs.waiting.push_back(id.clone());
+    drop(jobs);
     shared.queued.notify_all();
-    Ok(generation)
+    let location = format!("/v1/generations/{id}");
+    let body = serde_json::to_vec(&described).unwrap_or_default();
+    respond(stream, 202, &[("content-type", "application/json"), ("location", &location)], &body)
 }
 
-pub fn parse_multipart(body: &[u8], boundary: &str) -> HashMap<String, String> {
-    let body = String::from_utf8_lossy(body);
-    let delimiter = format!("--{boundary}");
-    let mut fields = HashMap::new();
-    for part in body.split(delimiter.as_str()).skip(1) {
-        if part.starts_with("--") {
-            break;
+fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    haystack.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|i| i + from)
+}
+
+/// The fields of a `multipart/form-data` body, in the order they came.
+pub fn parse_multipart(body: &[u8], boundary: &str) -> Vec<Field> {
+    let delimiter = format!("\r\n--{boundary}").into_bytes();
+    let mut fields = Vec::new();
+    let Some(first) = find_bytes(body, &delimiter[2..], 0) else { return fields };
+    let mut at = first + delimiter.len() - 2;
+    while body.get(at..at + 2) == Some(b"\r\n") {
+        let start = at + 2;
+        let Some(head_end) = find_bytes(body, b"\r\n\r\n", start) else { break };
+        let Some(end) = find_bytes(body, &delimiter, head_end + 4) else { break };
+        let head = String::from_utf8_lossy(&body[start..head_end]);
+        let param = |key: &str| head.split(&format!("{key}=\"")).nth(1).and_then(|s| s.split('"').next()).map(str::to_owned);
+        if let Some(name) = param(" name").or_else(|| param(";name")) {
+            fields.push(Field { name, filename: param("filename"), bytes: body[head_end + 4..end].to_vec() });
         }
-        let part = part.strip_prefix("\r\n").unwrap_or(part);
-        let Some((headers, value)) = part.split_once("\r\n\r\n") else { continue };
-        let Some(name) = headers.split("name=\"").nth(1).and_then(|s| s.split('"').next()) else { continue };
-        fields.insert(name.to_owned(), value.strip_suffix("\r\n").unwrap_or(value).to_owned());
+        at = end + delimiter.len();
     }
     fields
 }
 
 fn events(mut stream: TcpStream, shared: &Shared, id: &str) -> std::io::Result<()> {
-    if find(shared, id).is_none() {
-        return text(&mut stream, 404, "no such generation");
-    }
-    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")?;
+    let Some(start) = shared.lock().list.iter().find(|j| j.id == id).map(|j| j.said.len() - 1) else {
+        return refuse(&mut stream, 404, "no such generation");
+    };
+    write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n")?;
     stream.flush()?;
-    let mut sent = 0;
+    let mut next = start;
     loop {
         let event = {
             let mut jobs = shared.lock();
             loop {
-                let Some(job) = jobs.list.iter().find(|j| j.generation.id == id) else { return Ok(()) };
-                if let Some(event) = job.events.get(sent) {
-                    break event.clone();
+                let Some(job) = jobs.list.iter().find(|j| j.id == id) else { return Ok(()) };
+                if let Some(event) = job.said.get(next) {
+                    break Some(event.clone());
                 }
-                jobs = shared.changed.wait(jobs).unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (guard, waited) = shared.changed.wait_timeout(jobs, KEEP_ALIVE).unwrap_or_else(std::sync::PoisonError::into_inner);
+                jobs = guard;
+                if waited.timed_out() {
+                    break None;
+                }
             }
         };
-        sent += 1;
+        let Some(event) = event else {
+            write!(stream, ":\n\n")?;
+            stream.flush()?;
+            continue;
+        };
+        next += 1;
         write!(stream, "data: {}\n\n", serde_json::to_string(&event).unwrap_or_default())?;
         stream.flush()?;
         if event.is_finished() {
@@ -377,14 +534,22 @@ fn events(mut stream: TcpStream, shared: &Shared, id: &str) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{Part, multipart};
 
     #[test]
-    fn multipart_from_the_client_round_trips() {
-        let (content_type, body) = crate::api::multipart(&[("prompt", "a\r\nb".into()), ("seed", "9".into())], "XyZ");
+    fn multipart_from_the_client_round_trips_text_and_files() {
+        let parts = [
+            Part::Text { name: "prompt", value: "a\r\nb".into() },
+            Part::File { name: "reference", filename: "picture-1.png".into(), bytes: b"\r\n--Xy-not-quite\0".to_vec() },
+            Part::File { name: "reference", filename: "picture-2.jpg".into(), bytes: vec![255, 216] },
+        ];
+        let (content_type, body) = multipart(&parts, "XyZ");
         assert!(content_type.ends_with("boundary=XyZ"));
         let fields = parse_multipart(&body, "XyZ");
-        assert_eq!(fields.get("prompt").map(String::as_str), Some("a\r\nb"));
-        assert_eq!(fields.get("seed").map(String::as_str), Some("9"));
+        assert_eq!(fields.len(), 3);
+        assert_eq!((fields[0].name.as_str(), fields[0].filename.as_deref(), fields[0].text().as_str()), ("prompt", None, "a\r\nb"));
+        assert_eq!((fields[1].filename.as_deref(), &fields[1].bytes[..]), (Some("picture-1.png"), &b"\r\n--Xy-not-quite\0"[..]));
+        assert_eq!(fields[2].bytes, [255, 216]);
     }
 
     #[test]
@@ -392,5 +557,17 @@ mod tests {
         let png = paint(320, 192, 7);
         let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
         assert_eq!((img.width(), img.height()), (320, 192));
+    }
+
+    #[test]
+    fn fields_are_refused_as_the_server_refuses_them() {
+        let text = |name: &str| Field { name: name.into(), filename: None, bytes: Vec::new() };
+        let file = |name: &str| Field { filename: Some("a.png".into()), ..text(name) };
+        assert_eq!(refused(Output::Picture, &text("steps")).as_deref(), Some("steps is not an option of a picture"));
+        assert_eq!(refused(Output::Picture, &text("reference")).as_deref(), Some("reference takes an uploaded file"));
+        assert_eq!(refused(Output::Picture, &file("width")).as_deref(), Some("width takes text, not a file"));
+        assert_eq!(refused(Output::Picture, &file("reference")), None);
+        assert_eq!(refused(Output::Video, &text("steps")), None);
+        assert_eq!(refused(Output::Video, &text("models")).as_deref(), Some("models is the server's to set, not a request's"));
     }
 }

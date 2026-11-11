@@ -52,7 +52,7 @@ fn cmd_return_in_the_prompt_generates_and_return_types_a_newline() {
     rt.key(KeyEvent { key: Key::Enter, mods: Mods { cmd: true, ..Mods::default() } });
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.gens.len(), 1);
-    assert_eq!(rt.state.gens[0].prompt, "a fox");
+    assert_eq!(rt.state.gens[0].prompt(), "a fox");
 }
 
 #[test]
@@ -88,11 +88,10 @@ fn running_rows_show_their_step_and_the_preview_its_progress() {
 }
 
 #[test]
-fn the_gallery_scene_shows_the_preview_stage_and_timings() {
+fn the_gallery_scene_shows_the_preview_stage_and_how_long_it_took() {
     let rt = runtime(scenes::gallery, false);
     assert!(rt.find("artifact-stage").is_some());
-    assert!(rt.find("timeline").is_some());
-    assert!(text_of(&rt, "total").starts_with("Total"));
+    assert!(rt.find("took").is_some());
 }
 
 #[test]

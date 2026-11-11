@@ -20,7 +20,9 @@ just studio::run
 
 The studio connects to `http://127.0.0.1:8833`. To use another address, pass `--server http://host:port` or set `MMH3_SERVER`. If the server isn't running, the studio shows the command that starts it and tries again every two seconds.
 
-To try the studio without the engine, run the mock server in place of `mmh3 server`. It implements the same API in image mode: six timed steps, then a painted PNG. A prompt that contains `[fail]` fails.
+The studio speaks the API in mmh3's `docs/server.md`: it asks for a picture at `POST /v1/images`, follows `GET /v1/generations/{id}/events`, and fetches the PNG from `GET /v1/generations/{id}/image`. The server answers with an id, a state, the step a generation is on and the seconds it took, and nothing of what was asked, so the studio keeps the prompt, size and seed of each generation it asked for itself.
+
+To try the studio without the engine, run the mock server in place of `mmh3 server`. It answers the same routes with the same JSON, status codes and event stream: six timed steps, then a painted PNG. It checks a picture's fields as `mmh3 image` does, so a bad value fails the generation, and a prompt that contains `[fail]` fails after its steps.
 
 ```sh
 just studio::mock-server   # in place of `just server`
@@ -30,8 +32,8 @@ just studio::run-mock      # or the mock and the studio together
 ## Using it
 
 - **Composer:** write a prompt, then choose a size. The presets are 2048×2048 for a 4 MP draft, and 16 MP finals at 1:1, 4:3, 3:4, 16:9 and 9:16. A custom size takes multiples of 32, from 256 to 8192 pixels on each side. Set a seed or randomise it. ⌘↩ generates; plain Return starts a new line. You can queue as many generations as you like.
-- **Gallery** (left pane): shows every image generation on the server, newest first. Each row shows its live step (k of 6) and elapsed time. Right-click a row to save the PNG, reveal it in Finder, copy the prompt or seed, re-run it with a new seed, or delete it. You can also drag a thumbnail out to Finder.
-- **Preview:** the selected image at full size, with its size and seed. A timeline under it shows how long each stage took: text encoder, each step, and VAE decode. To zoom about the pointer, click, pinch or use Ctrl+wheel. To pan, drag or scroll. The buttons zoom in, zoom out and fit.
+- **Gallery** (left pane): shows the pictures the studio asked the server for, newest first. Each row shows what the generation is doing (reading the prompt, step k of 6, decoding) and the time since it started. Right-click a row to save the PNG, reveal it in Finder, copy the prompt or seed, re-run it with a new seed, or delete it. You can also drag a thumbnail out to Finder.
+- **Preview:** the selected image at full size, with its size, seed and how long the server says the generation took. The server times the whole generation, not its stages. To zoom about the pointer, click, pinch or use Ctrl+wheel. To pan, drag or scroll. The buttons zoom in, zoom out and fit.
 - **Status bar:** shows whether the server is connected, which models are resident, free and total memory, and the queue.
 
 Generated PNGs go into the app's cache folder (`~/Library/Caches/dev.mmh3.studio/images`). Each PNG is downloaded once. Thumbnails are decoded off the UI thread and scaled down to 256 px. Only the selected image is kept at full resolution, and Rune decodes it with mipmaps on its own workers.

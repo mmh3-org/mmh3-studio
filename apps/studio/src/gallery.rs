@@ -46,13 +46,35 @@ pub fn elapsed(since: f64, clock: f64) -> String {
     format!("{:.1} s", (clock - since).max(0.0))
 }
 
+/// What a running generation is doing, from the steps the server says are behind it, and how
+/// far along that is.
+pub fn stage(g: &Gen, step: Option<u32>, steps: u32) -> (String, f32) {
+    match step {
+        None if g.references().is_empty() => ("Reading the prompt".into(), 0.0),
+        None => ("Reading the prompt and pictures".into(), 0.0),
+        Some(k) if k < steps => (format!("Step {} of {steps}", k + 1), k as f32 / steps.max(1) as f32),
+        Some(_) => ("Decoding the picture".into(), 1.0),
+    }
+}
+
+pub fn title(g: &Gen) -> String {
+    match &g.request {
+        None => "Asked for elsewhere".to_owned(),
+        Some(r) if r.prompt.is_empty() => "Untitled".to_owned(),
+        Some(r) => r.prompt.replace('\n', " "),
+    }
+}
+
 fn status_line(g: &Gen, clock: f64, k: &Kit) -> (String, rune::Color) {
     let c = &k.c;
     match &g.phase {
         Phase::Sending => ("Sending…".into(), c.text_faint),
         Phase::Queued => ("Queued".into(), c.text_faint),
-        Phase::Running { step, steps, since } => (format!("Step {step} of {steps} · {}", elapsed(*since, clock)), c.text_muted),
-        Phase::Done { seconds, .. } => (format!("{}×{} · {seconds:.1} s", g.width, g.height), c.text_faint),
+        Phase::Running { step, steps, since } => (format!("{} · {}", stage(g, *step, *steps).0, elapsed(*since, clock)), c.text_muted),
+        Phase::Done { seconds } => match g.size() {
+            Some((w, h)) => (format!("{w}×{h} · {seconds:.1} s"), c.text_faint),
+            None => (format!("{seconds:.1} s"), c.text_faint),
+        },
         Phase::Failed(_) => ("Failed".into(), c.danger.fg),
     }
 }
@@ -77,7 +99,7 @@ fn thumb(g: &Gen, k: &Kit) -> El {
 fn build_row(g: &Gen, selected: bool, clock: f64, k: &Kit) -> El {
     let c = &k.c;
     let (status, ink) = status_line(g, clock, k);
-    let title = if g.prompt.is_empty() { "Untitled".to_owned() } else { g.prompt.replace('\n', " ") };
+    let title = title(g);
     let mut lines = col()
         .key("lines")
         .grow(1.0)
@@ -95,7 +117,7 @@ fn build_row(g: &Gen, selected: bool, clock: f64, k: &Kit) -> El {
         )
         .child(text(status.clone()).key("row-status").font(k.ty.small).color(ink).truncate().a11y_hidden());
     if let Phase::Running { step, steps, .. } = g.phase {
-        lines = lines.child(Progress::new(Some(step as f32 / steps.max(1) as f32)).build(k).key("row-progress").a11y_hidden());
+        lines = lines.child(Progress::new(Some(stage(g, step, steps).1)).build(k).key("row-progress").a11y_hidden());
     }
     let id = g.id.clone();
     let menu_id = g.id.clone();

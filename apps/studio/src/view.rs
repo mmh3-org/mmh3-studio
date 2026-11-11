@@ -43,7 +43,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 type Action = Box<dyn Fn(&mut State, &mut rune::Tx)>;
 
 fn toolbar(s: &State, k: &Kit) -> Toolbar {
-    let title = s.selected_gen().map_or_else(|| "mmh3 studio".to_owned(), |g| g.prompt.lines().next().unwrap_or_default().to_owned());
+    let title = s.selected_gen().map_or_else(|| "mmh3 studio".to_owned(), |g| gallery::title(g).lines().next().unwrap_or_default().to_owned());
     let mut actions = row().key("toolbar-actions").gap(2.0).center_y();
     if let Some(g) = s.selected_gen() {
         let done = g.file().is_some();
@@ -64,12 +64,13 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
         actions = actions.child(act(&icons::SAVE, "save", "Save PNG…", !done, Box::new(move |s, tx| s.save(&i, tx))));
         let i = id.clone();
         actions = actions.child(act(&icons::REVEAL, "reveal", "Reveal in Finder", !done, Box::new(move |s, _| s.reveal(&i))));
-        let prompt = g.prompt.clone();
-        actions = actions.child(act(&icons::COPY, "copy-prompt", "Copy prompt", false, Box::new(move |_, tx| tx.copy(prompt.clone()))));
-        let seed = g.seed.to_string();
-        actions = actions.child(act(&icons::HASH, "copy-seed", "Copy seed", false, Box::new(move |_, tx| tx.copy(seed.clone()))));
+        let known = g.request.is_some();
+        let prompt = g.prompt().to_owned();
+        actions = actions.child(act(&icons::COPY, "copy-prompt", "Copy prompt", !known, Box::new(move |_, tx| tx.copy(prompt.clone()))));
+        let seed = g.seed().map(|s| s.to_string()).unwrap_or_default();
+        actions = actions.child(act(&icons::HASH, "copy-seed", "Copy seed", !known, Box::new(move |_, tx| tx.copy(seed.clone()))));
         let i = id.clone();
-        actions = actions.child(act(&icons::RERUN, "rerun", "Re-run with a new seed", !s.connected(), Box::new(move |s, _| s.rerun(&i))));
+        actions = actions.child(act(&icons::RERUN, "rerun", "Re-run with a new seed", !s.connected() || !known, Box::new(move |s, _| s.rerun(&i))));
         let i = id.clone();
         actions = actions.child(act(&icons::TRASH, "delete", "Delete", running, Box::new(move |s, _| s.delete(&i))));
     }
@@ -93,7 +94,9 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
     let done = g.file().is_some();
     let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
     let item = |label: &str| rune_kit::MenuItem::new(label);
-    let (a, b, c, d, e, f) = (id.to_owned(), id.to_owned(), g.prompt.clone(), g.seed.to_string(), id.to_owned(), id.to_owned());
+    let known = g.request.is_some();
+    let (a, b, c, d, e, f) =
+        (id.to_owned(), id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
     context_menu("gallery-menu", trigger, Some(at))
         .item(item("Save PNG…").icon(&icons::SAVE).disabled(!done).on_select_tx(move |s: &mut State, tx| {
             s.menu = None;
@@ -104,15 +107,15 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
             s.reveal(&b);
         }))
         .separator()
-        .item(item("Copy prompt").icon(&icons::COPY).on_select_tx(move |s: &mut State, tx| {
+        .item(item("Copy prompt").icon(&icons::COPY).disabled(!known).on_select_tx(move |s: &mut State, tx| {
             s.menu = None;
             tx.copy(c.clone());
         }))
-        .item(item("Copy seed").icon(&icons::HASH).on_select_tx(move |s: &mut State, tx| {
+        .item(item("Copy seed").icon(&icons::HASH).disabled(!known).on_select_tx(move |s: &mut State, tx| {
             s.menu = None;
             tx.copy(d.clone());
         }))
-        .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected()).on_select(move |s: &mut State| {
+        .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected() || !known).on_select(move |s: &mut State| {
             s.menu = None;
             s.rerun(&e);
         }))
@@ -127,7 +130,7 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
 
 fn confirm_delete(s: &State, k: &Kit, layer: &mut Vec<El>) {
     let Some(g) = s.deleting.as_deref().and_then(|id| s.item(id)) else { return };
-    let what = if g.prompt.is_empty() { "this image".to_owned() } else { format!("\u{201c}{}\u{201d}", g.prompt.lines().next().unwrap_or_default()) };
+    let what = if g.prompt().is_empty() { "this image".to_owned() } else { format!("\u{201c}{}\u{201d}", g.prompt().lines().next().unwrap_or_default()) };
     let actions = row()
         .key("delete-actions")
         .w_full()

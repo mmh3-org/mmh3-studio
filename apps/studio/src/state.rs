@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mmh3_studio::api::{self, Generation, ImageRequest, Kind, Status, Timings};
+use mmh3_studio::api::{self, Generation, ImageRequest, Status};
 use mmh3_studio::sizes::{self, PRESETS, SizeError};
 use rune::machine::Effects;
 use rune::{Image, ImageCache, PointerPress, TextEdit, Tx};
@@ -29,14 +29,15 @@ pub enum Phase {
     /// Posted, waiting for the server's 202.
     Sending,
     Queued,
+    /// `step` is how many steps are behind it: none while it reads the prompt, all of them
+    /// while the picture decodes.
     Running {
-        step: u32,
+        step: Option<u32>,
         steps: u32,
         since: f64,
     },
     Done {
         seconds: f64,
-        timings: Option<Timings>,
     },
     Failed(String),
 }
@@ -63,9 +64,9 @@ pub fn step(phase: &mut Phase, g: &Generation, now: f64) -> Effects<Effect> {
                 Phase::Running { since, .. } => since,
                 _ => now,
             };
-            Phase::Running { step: g.step.unwrap_or(0), steps: g.steps.unwrap_or(api::IMAGE_STEPS), since }
+            Phase::Running { step: g.step, steps: g.steps.unwrap_or(api::IMAGE_STEPS), since }
         }
-        api::State::Done => Phase::Done { seconds: g.seconds.unwrap_or_default(), timings: g.timings.clone() },
+        api::State::Done => Phase::Done { seconds: g.seconds.unwrap_or_default() },
         api::State::Failed => Phase::Failed(g.error.clone().unwrap_or_else(|| "The server gave no reason.".into())),
     };
     match (&was, &*phase) {
@@ -85,29 +86,35 @@ pub enum Picture {
 
 pub struct Gen {
     pub id: String,
-    pub prompt: String,
-    pub seed: u64,
-    pub width: u32,
-    pub height: u32,
+    /// What the studio asked for; the server never says, so a picture asked for elsewhere has
+    /// none.
+    pub request: Option<ImageRequest>,
     pub phase: Phase,
     pub picture: Picture,
     pub revision: u64,
 }
 
 impl Gen {
-    pub fn from_server(g: &Generation, now: f64) -> Gen {
-        let mut item = Gen {
-            id: g.id.clone(),
-            prompt: g.prompt.clone().unwrap_or_default(),
-            seed: g.seed.unwrap_or_default(),
-            width: g.width.unwrap_or_default(),
-            height: g.height.unwrap_or_default(),
-            phase: Phase::Queued,
-            picture: Picture::None,
-            revision: 0,
-        };
+    pub fn from_server(g: &Generation, request: Option<ImageRequest>, now: f64) -> Gen {
+        let mut item = Gen { id: g.id.clone(), request, phase: Phase::Queued, picture: Picture::None, revision: 0 };
         let _ = step(&mut item.phase, g, now);
         item
+    }
+
+    pub fn prompt(&self) -> &str {
+        self.request.as_ref().map_or("", |r| r.prompt.as_str())
+    }
+
+    pub fn seed(&self) -> Option<u64> {
+        self.request.as_ref().map(|r| r.seed)
+    }
+
+    pub fn size(&self) -> Option<(u32, u32)> {
+        self.request.as_ref().map(|r| (r.width, r.height))
+    }
+
+    pub fn references(&self) -> &[PathBuf] {
+        self.request.as_ref().map_or(&[], |r| r.references.as_slice())
     }
 
     pub fn file(&self) -> Option<&PathBuf> {
@@ -160,6 +167,8 @@ pub struct State {
     pub clock: f64,
     pub tick: u64,
     pub watching: HashSet<String>,
+    /// What the studio asked each of its generations for, by the server's id.
+    pub requests: HashMap<String, ImageRequest>,
     next_local: u64,
 }
 
@@ -199,6 +208,7 @@ impl State {
             clock: 0.0,
             tick: 0,
             watching: HashSet::new(),
+            requests: HashMap::new(),
             next_local: 0,
         }
     }
@@ -257,7 +267,7 @@ impl State {
         }
         let (width, height) = self.chosen_size().map_err(|e| e.to_string())?;
         let seed = self.seed_value().ok_or("The seed must be a whole number.")?;
-        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None })
+        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references: Vec::new() })
     }
 
     pub fn generate(&mut self) {
@@ -271,27 +281,14 @@ impl State {
         if let Err(why) = self.reachable() {
             return self.note(why, None, true);
         }
-        let Some(g) = self.item(id) else { return };
-        let r = ImageRequest { prompt: g.prompt.clone(), seed: random_seed(), width: g.width, height: g.height, min_generation_area: None };
-        self.submit(r);
+        let Some(r) = self.item(id).and_then(|g| g.request.clone()) else { return };
+        self.submit(ImageRequest { seed: random_seed(), ..r });
     }
 
     pub fn submit(&mut self, r: ImageRequest) {
         self.next_local += 1;
         let id = format!("local-{}", self.next_local);
-        self.gens.insert(
-            0,
-            Gen {
-                id: id.clone(),
-                prompt: r.prompt.clone(),
-                seed: r.seed,
-                width: r.width,
-                height: r.height,
-                phase: Phase::Sending,
-                picture: Picture::None,
-                revision: 0,
-            },
-        );
+        self.gens.insert(0, Gen { id: id.clone(), request: Some(r.clone()), phase: Phase::Sending, picture: Picture::None, revision: 0 });
         self.select(&id);
         if let Some(net) = &self.net {
             net.submit(id, r);
@@ -312,7 +309,13 @@ impl State {
             }
         };
         let was_selected = self.selected.as_deref() == Some(local);
-        if self.item(&created.id).is_some() {
+        let request = self.item(local).and_then(|g| g.request.clone());
+        if let Some(r) = &request {
+            self.requests.insert(created.id.clone(), r.clone());
+        }
+        if let Some(g) = self.item_mut(&created.id) {
+            g.request = request;
+            g.revision += 1;
             self.gens.retain(|g| g.id != local);
         } else {
             let Some(g) = self.item_mut(local) else { return };
@@ -373,8 +376,8 @@ impl State {
     }
 
     /// The server's list, most recent first: keeps what the app already holds for each, adds
-    /// the new ones and drops what the server no longer has. Pictures are fetched for the rows
-    /// that keep a thumbnail; older ones wait until they are selected.
+    /// the pictures the studio asked for and drops what the server no longer has. Pictures are
+    /// fetched for the rows that keep a thumbnail; older ones wait until they are selected.
     pub fn merge(&mut self, list: &[Generation], now: f64) {
         let mut old: Vec<Gen> = std::mem::take(&mut self.gens);
         let mut gens: Vec<Gen> = Vec::new();
@@ -383,7 +386,7 @@ impl State {
             if old[i].is_local() { gens.push(old.remove(i)) } else { i += 1 }
         }
         let mut effects = Vec::new();
-        for g in list.iter().filter(|g| g.kind == Kind::Image) {
+        for g in list {
             let item = match old.iter().position(|o| o.id == g.id) {
                 Some(at) => {
                     let mut item = old.remove(at);
@@ -392,7 +395,10 @@ impl State {
                     effects.extend(fx.into_iter().map(|e| (g.id.clone(), e)));
                     item
                 }
-                None => Gen::from_server(g, now),
+                None => match self.requests.get(&g.id) {
+                    Some(r) => Gen::from_server(g, Some(r.clone()), now),
+                    None => continue,
+                },
             };
             if item.phase.is_active() {
                 effects.push((g.id.clone(), Effect::Watch));
@@ -400,6 +406,8 @@ impl State {
             gens.push(item);
         }
         self.gens = gens;
+        let listed: HashSet<&str> = list.iter().map(|g| g.id.as_str()).collect();
+        self.requests.retain(|id, _| listed.contains(id.as_str()));
         let gone: Vec<String> = old.into_iter().filter(|o| !o.is_local()).map(|o| o.id).collect();
         if let (Some(net), false) = (&self.net, gone.is_empty()) {
             net.forget(&gone);
