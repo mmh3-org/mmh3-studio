@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use mmh3_studio::sizes::megapixels;
+use crate::sizes::megapixels;
 use rune::{Cx, El, col, el, icon, row, text};
 use rune_kit::image_zoom::Stage;
 use rune_kit::{Button, ButtonVariant, Kit, Progress, Spinner};
@@ -45,7 +45,7 @@ fn empty(s: &State, k: &Kit) -> El {
 
 pub fn start_command(s: &State) -> String {
     let mut cmd = String::from("export MMH3_MODELS=$PWD/models\ntarget/release/mmh3 server");
-    if s.server != mmh3_studio::api::DEFAULT_SERVER {
+    if s.server != crate::api::DEFAULT_SERVER {
         let _ = write!(cmd, " --listen {}", s.host());
     }
     cmd
@@ -164,7 +164,7 @@ fn facts(s: &State, g: &Gen, k: &Kit) -> El {
         n => facts = facts.child(caption("Edits", format!("{n} pictures"), k)),
     }
     if let Phase::Done { seconds } = g.phase {
-        facts = facts.child(caption("Took", format!("{seconds:.1} s · {} steps", mmh3_studio::api::IMAGE_STEPS), k).key("took"));
+        facts = facts.child(caption("Took", format!("{seconds:.1} s · {} steps", crate::api::IMAGE_STEPS), k).key("took"));
     }
     if g.request.is_none() {
         facts = facts.child(caption("Prompt", "Asked for outside the studio".into(), k));

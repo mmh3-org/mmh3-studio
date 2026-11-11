@@ -218,7 +218,7 @@ fn picture_files(n: usize) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
     let files = (0..n)
         .map(|i| {
             let file = dir.join(format!("p{i}.png"));
-            std::fs::write(&file, mmh3_studio::mock::paint(64, 64, i as u64)).unwrap();
+            std::fs::write(&file, mock::paint(64, 64, i as u64)).unwrap();
             file
         })
         .collect();

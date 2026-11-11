@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use mmh3_studio::api::{Generation, ImageRequest, Memory, State as Remote, Status};
-use mmh3_studio::mock::paint;
+use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status};
+use crate::mock::paint;
 
 use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
@@ -67,7 +67,7 @@ fn picture(s: &mut State, id: &str, preview: bool) {
     let Some(((w, h), seed)) = g.size().zip(g.seed()) else { return };
     let (w, h) = (w / 4, h / 4);
     let png = paint(w - w % 8, h - h % 8, seed);
-    let thumb = mmh3_studio::thumb::thumbnail(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
+    let thumb = crate::thumb::thumbnail(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
     if let Some(t) = &thumb {
         let _ = t.wait();
     }
@@ -159,7 +159,7 @@ pub fn references(s: &mut State) {
     s.prompt.replace_text("<Picture 1> at night, the street lamps lit, with the fox from <Picture 2> sitting on the steps of <Picture 3>");
     for (i, (name, seed)) in [("street.jpg", 21_u64), ("fox.png", 31_337), ("house.png", 912)].into_iter().enumerate() {
         let png = paint(240, 160 + 40 * i as u32, seed);
-        let thumb = mmh3_studio::thumb::reference(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
+        let thumb = crate::thumb::reference(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
         if let Some(t) = &thumb {
             let _ = t.wait();
         }

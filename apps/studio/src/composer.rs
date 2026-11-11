@@ -1,5 +1,5 @@
-use mmh3_studio::api::MAX_REFERENCES;
-use mmh3_studio::sizes::{PRESETS, megapixels};
+use crate::api::MAX_REFERENCES;
+use crate::sizes::{PRESETS, megapixels};
 use rune::{El, Key, KeyEvent, SurfaceFit, Tx, col, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner, TextArea, TextInput};
 

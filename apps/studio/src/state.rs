@@ -3,8 +3,8 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mmh3_studio::api::{self, Generation, ImageRequest, Status};
-use mmh3_studio::sizes::{self, PRESETS, SizeError};
+use crate::api::{self, Generation, ImageRequest, Status};
+use crate::sizes::{self, PRESETS, SizeError};
 use rune::machine::Effects;
 use rune::{Image, ImageCache, PointerPress, TextEdit, Tx};
 use rune_kit::image_zoom::StageZoom;

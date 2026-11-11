@@ -8,10 +8,10 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use mmh3_studio::api::{Client, Error, Generation, ImageRequest, Status};
+use crate::api::{Client, Error, Generation, ImageRequest, Status};
 
 pub type Requests = HashMap<String, ImageRequest>;
-use mmh3_studio::thumb::{self, thumbnail};
+use crate::thumb::{self, thumbnail};
 use rune::{AppHandle, ImageCache};
 
 use crate::state::{Probe, State};
@@ -411,8 +411,8 @@ mod tests {
 
     #[test]
     fn a_probe_tells_pictures_from_videos_and_keeps_a_finished_png() {
-        use mmh3_studio::api::{Part, multipart};
-        use mmh3_studio::mock::{self, Config};
+        use crate::api::{Part, multipart};
+        use crate::mock::{self, Config};
 
         let ms = Duration::from_millis;
         let addr = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10) }).unwrap();
@@ -429,7 +429,7 @@ mod tests {
         let mut answer = agent.post(&format!("{}/v1/generations", client.base())).header("Content-Type", &content_type).send(&body[..]).unwrap();
         let video: Generation = serde_json::from_str(&answer.body_mut().read_to_string().unwrap()).unwrap();
 
-        assert!(matches!(probe(&client, &pictures, &done.id), Probe::Picture(g) if g.state == mmh3_studio::api::State::Done));
+        assert!(matches!(probe(&client, &pictures, &done.id), Probe::Picture(g) if g.state == crate::api::State::Done));
         assert!(pictures.file(&done.id).is_file(), "the PNG it was sent is kept");
         assert!(matches!(probe(&client, &pictures, &pending.id), Probe::Picture(_)));
         assert_eq!(probe(&client, &pictures, &video.id), Probe::NotAPicture);

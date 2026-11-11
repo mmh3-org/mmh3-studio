@@ -1,4 +1,4 @@
-use mmh3_studio::api::{self, Generation};
+use crate::api::{self, Generation};
 
 use super::*;
 
