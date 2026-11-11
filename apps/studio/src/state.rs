@@ -141,6 +141,38 @@ impl Gen {
     }
 }
 
+/// The file types `mmh3 image` reads a reference from.
+pub const REFERENCE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
+
+/// A picture the composer will ask the server to edit.
+pub struct Reference {
+    pub path: PathBuf,
+    pub thumb: Thumb,
+}
+
+pub enum Thumb {
+    Loading,
+    Ready(Image),
+    Failed(String),
+}
+
+/// The `<Picture n>` a prompt mentions that are not attached, in order and once each.
+pub fn missing_pictures(prompt: &str, attached: usize) -> Vec<usize> {
+    let mut missing: Vec<usize> = prompt
+        .split("<Picture ")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('>').and_then(|(n, _)| n.trim().parse().ok()))
+        .filter(|&n: &usize| n == 0 || n > attached)
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    missing
+}
+
+pub fn picture_tag(n: usize) -> String {
+    format!("<Picture {n}>")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SizeChoice {
     Preset(usize),
@@ -169,6 +201,9 @@ pub struct State {
     pub custom_w: TextEdit,
     pub custom_h: TextEdit,
     pub seed: TextEdit,
+    pub references: Vec<Reference>,
+    /// Files are being dragged over the composer.
+    pub dropping: bool,
     pub preview: Option<(String, Image)>,
     pub stage: StageZoom,
     pub sidebar: PaneState,
@@ -195,6 +230,16 @@ pub fn random_seed() -> u64 {
     h.finish() % 4_294_967_296
 }
 
+/// Asks for a picture to edit with the system's Open dialog.
+pub fn ask_for_reference(tx: &mut Tx) {
+    let options = rune::FileDialogOptions { title: "Add a picture to edit".into(), ..Default::default() }.filter("PNG or JPEG picture", &REFERENCE_EXTENSIONS);
+    tx.open_file(options, |s: &mut State, answer, _tx| match answer {
+        Ok(Some(path)) => s.add_references(&[path]),
+        Ok(None) => {}
+        Err(e) => s.note("Couldn't open the file dialog.", Some(format!("{e:?}")), true),
+    });
+}
+
 pub fn server_from_args() -> String {
     let args = rune::extra_args();
     let flag = args.iter().position(|a| a == "--server").and_then(|i| args.get(i + 1)).cloned();
@@ -216,6 +261,8 @@ impl State {
             custom_w: TextEdit::new("1536"),
             custom_h: TextEdit::new("1024"),
             seed: TextEdit::new(random_seed().to_string()),
+            references: Vec::new(),
+            dropping: false,
             preview: None,
             stage: StageZoom::default(),
             sidebar: PaneState::new(300.0).range(220.0, 480.0),
@@ -286,7 +333,12 @@ impl State {
         }
         let (width, height) = self.chosen_size().map_err(|e| e.to_string())?;
         let seed = self.seed_value().ok_or("The seed must be a whole number.")?;
-        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references: Vec::new() })
+        if let Some(Reference { path, .. }) = self.references.iter().find(|r| matches!(r.thumb, Thumb::Failed(_))) {
+            let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            return Err(format!("{name} isn't a picture mmh3 can read. Remove it first."));
+        }
+        let references = self.references.iter().map(|r| r.path.clone()).collect();
+        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references })
     }
 
     pub fn generate(&mut self) {
@@ -610,6 +662,59 @@ impl State {
             Err(e) if e.is_unreachable() => Conn::Disconnected(e.to_string()),
             Err(e) => Conn::Unreadable(e.to_string()),
         };
+    }
+
+    /// Attaches pictures to edit, after the ones already attached, leaving out what is attached
+    /// already and what is past the server's limit.
+    pub fn add_references(&mut self, paths: &[PathBuf]) {
+        let mut over = 0;
+        for path in paths {
+            if self.references.iter().any(|r| r.path == *path) {
+                continue;
+            }
+            if self.references.len() >= api::MAX_REFERENCES {
+                over += 1;
+                continue;
+            }
+            if let Some(net) = &self.net {
+                net.reference_thumb(path.clone());
+            }
+            self.references.push(Reference { path: path.clone(), thumb: Thumb::Loading });
+        }
+        if over > 0 {
+            let detail = format!("{over} more {} left out.", if over == 1 { "was" } else { "were" });
+            self.note(format!("mmh3 edits up to {} pictures at once.", api::MAX_REFERENCES), Some(detail), true);
+        }
+    }
+
+    pub fn reference_thumb(&mut self, path: &std::path::Path, thumb: Result<Image, String>) {
+        if let Some(r) = self.references.iter_mut().find(|r| r.path == path) {
+            r.thumb = match thumb {
+                Ok(img) => Thumb::Ready(img),
+                Err(why) => Thumb::Failed(why),
+            };
+        }
+    }
+
+    /// Takes picture `i` away; the ones after it move up, so the prompt's tags past it would
+    /// point at the next picture, which the composer's warning shows.
+    pub fn remove_reference(&mut self, i: usize) {
+        if i < self.references.len() {
+            self.references.remove(i);
+        }
+    }
+
+    /// Puts `<Picture n>` into the prompt where the cursor is.
+    pub fn insert_picture_tag(&mut self, n: usize) {
+        self.prompt.insert(&picture_tag(n));
+    }
+
+    /// Attaches a finished generation's picture, to edit it further.
+    pub fn edit_picture(&mut self, id: &str) {
+        if let Some(file) = self.item(id).and_then(|g| g.file().cloned()) {
+            self.add_references(&[file]);
+            self.inspector.set_open(true);
+        }
     }
 
     pub fn randomise_seed(&mut self) {

@@ -31,7 +31,7 @@ just studio::run-mock      # or the mock and the studio together
 
 ## Using it
 
-- **Composer:** write a prompt, then choose a size. The presets are 2048×2048 for a 4 MP draft, and 16 MP finals at 1:1, 4:3, 3:4, 16:9 and 9:16. A custom size takes multiples of 32, from 256 to 8192 pixels on each side. Set a seed or randomise it. ⌘↩ generates; plain Return starts a new line. You can queue as many generations as you like.
+- **Composer:** write a prompt, then choose a size. The presets are 2048×2048 for a 4 MP draft, and 16 MP finals at 1:1, 4:3, 3:4, 16:9 and 9:16. A custom size takes multiples of 32, from 256 to 8192 pixels on each side. Set a seed or randomise it. To edit pictures, drop up to 16 PNG or JPEG files on the composer or add them with **Add picture…**; the prompt refers to them as `<Picture 1>`, `<Picture 2>` and so on, and clicking a picture's tag puts it in the prompt. The composer warns when the prompt mentions a picture that isn't attached. **Edit this picture** in the toolbar or a row's menu attaches a finished picture. ⌘↩ generates; plain Return starts a new line. You can queue as many generations as you like.
 - **Gallery** (left pane): shows the pictures on the server, newest first, and leaves its videos out. A picture someone asked for with `curl` or another studio shows as asked for elsewhere, without a prompt or seed, since the server keeps neither. Each row shows what the generation is doing (reading the prompt, step k of 6, decoding) and the time since it started. Right-click a row to save the PNG, reveal it in Finder, copy the prompt or seed, re-run it with a new seed, or delete it. You can also drag a thumbnail out to Finder.
 - **Preview:** the selected image at full size, with its size, seed and how long the server says the generation took. The server times the whole generation, not its stages. To zoom about the pointer, click, pinch or use Ctrl+wheel. To pan, drag or scroll. The buttons zoom in, zoom out and fit.
 - **Status bar:** shows whether the server is connected, which models are resident, free and total memory, and the queue.
@@ -55,6 +55,8 @@ The screenshot script first renders the fixture scenes, which never touch the ne
 - `failed`
 - `custom-size`
 - `offline-selected`
+- `confirm-delete`
+- `references`
 
 It then runs the studio headless with `--realtime` against the mock server. In that run, `scripts/generate.json` queues two 16 MP generations. To render a single scene:
 

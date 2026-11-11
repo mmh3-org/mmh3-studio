@@ -11,7 +11,7 @@ use std::time::Duration;
 use mmh3_studio::api::{Client, Error, Generation, ImageRequest, Status};
 
 pub type Requests = HashMap<String, ImageRequest>;
-use mmh3_studio::thumb::thumbnail;
+use mmh3_studio::thumb::{self, thumbnail};
 use rune::{AppHandle, ImageCache};
 
 use crate::state::{Probe, State};
@@ -125,6 +125,7 @@ pub struct Net {
     requests_file: PathBuf,
     remember: Sender<Requests>,
     probes: Sender<String>,
+    images: Arc<ImageCache>,
 }
 
 impl Net {
@@ -145,14 +146,14 @@ impl Net {
             ControlFlow::Continue(())
         });
         let (wake, rx) = channel::<()>();
-        let (h, c, p) = (handle.clone(), client.clone(), pictures.clone());
+        let (h, c, p, images_for_pictures) = (handle.clone(), client.clone(), pictures.clone(), images.clone());
         let _ = rune::task::serve("mmh3-pictures", rx, move |()| {
             let Some(id) = p.lock().next() else { return ControlFlow::Continue(()) };
             let answer = p.fetch(&c, &id);
             p.lock().wanted.remove(&id);
             let answer = match answer {
                 Ok(None) => return ControlFlow::Continue(()),
-                Ok(Some((file, thumb))) => Ok((file, images.rgba(thumb.width(), thumb.height(), thumb.into_raw()))),
+                Ok(Some((file, thumb))) => Ok((file, images_for_pictures.rgba(thumb.width(), thumb.height(), thumb.into_raw()))),
                 Err(why) => Err(why),
             };
             h.update(move |s, _| match answer {
@@ -171,12 +172,22 @@ impl Net {
             });
             ControlFlow::Continue(())
         });
-        Net { handle, client, pictures, wake, requests_file, remember, probes }
+        Net { handle, client, pictures, wake, requests_file, remember, probes, images }
     }
 
     /// What the studio asked this server for in earlier runs, by the server's id.
     pub fn requests(&self) -> Requests {
         read_requests(&self.requests_file)
+    }
+
+    /// Decodes a small copy of a picture the composer will send, off the UI thread.
+    pub fn reference_thumb(&self, path: PathBuf) {
+        let (h, images) = (self.handle.clone(), self.images.clone());
+        let _ = rune::task::spawn("mmh3-reference", move || {
+            let thumb = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| thumb::reference(&bytes));
+            let thumb = thumb.map(|t| images.rgba(t.width(), t.height(), t.into_raw()));
+            h.update(move |s, _| s.reference_thumb(&path, thumb));
+        });
     }
 
     /// Asks the server whether a generation the studio did not ask for writes a picture.

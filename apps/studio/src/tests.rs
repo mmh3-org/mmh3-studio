@@ -211,3 +211,92 @@ fn placeholder_cards_stay_inside_their_frame_at_the_smallest_window() {
         assert!(card[0] >= frame[0] && card[0] + card[2] <= frame[0] + frame[2], "card {card:?} spills out of {frame:?}");
     }
 }
+
+fn picture_files(n: usize) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let dir = std::env::temp_dir().join(format!("mmh3-studio-drop-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let files = (0..n)
+        .map(|i| {
+            let file = dir.join(format!("p{i}.png"));
+            std::fs::write(&file, mmh3_studio::mock::paint(64, 64, i as u64)).unwrap();
+            file
+        })
+        .collect();
+    (dir, files)
+}
+
+#[test]
+fn pictures_dropped_on_the_composer_are_attached_in_order_and_sent_with_the_request() {
+    let mut rt = runtime(scenes::empty, false);
+    assert!(rt.find("reference-empty").is_some());
+    let (dir, files) = picture_files(2);
+    let at = rt.find("references").unwrap();
+    rt.drop_files(files.clone(), Some(at));
+    rt.frame(1.0 / 60.0);
+    let attached: Vec<_> = rt.state.references.iter().map(|r| r.path.clone()).collect();
+    assert_eq!(attached, files);
+    assert_eq!(text_of(&rt, "reference-count"), "2 of 16");
+    rt.update(|s, _| s.prompt.replace_text("Put "));
+    rt.frame(1.0 / 60.0);
+    let tags: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("reference-tag")).map(|e| e.rect).collect();
+    let second = tags[1];
+    rt.pointer_down(second[0] + second[2] / 2.0, second[1] + second[3] / 2.0);
+    rt.pointer_up(second[0] + second[2] / 2.0, second[1] + second[3] / 2.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.prompt.text, "Put <Picture 2>");
+    assert_eq!(rt.state.request().unwrap().references, files);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_dropped_file_that_is_not_a_picture_is_refused_with_a_reason() {
+    let mut rt = runtime(scenes::empty, false);
+    let at = rt.find("references").unwrap();
+    rt.drop_files(vec!["/tmp/notes.txt".into()], Some(at));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.references.is_empty());
+    assert_eq!(rt.state.notes.last().map(|n| n.title.as_str()), Some("mmh3 edits PNG and JPEG pictures."));
+}
+
+#[test]
+fn no_more_than_sixteen_pictures_are_attached() {
+    let mut rt = runtime(scenes::empty, false);
+    let (dir, files) = picture_files(17);
+    rt.update(|s, _| s.add_references(&files));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.references.len(), 16);
+    assert_eq!(rt.state.notes.last().and_then(|n| n.detail.as_deref()), Some("1 more was left out."));
+    rt.update(|s, _| s.add_references(&files[..1]));
+    assert_eq!(rt.state.references.len(), 16, "an attached picture is not attached twice");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn removing_a_picture_warns_about_the_tags_it_leaves_behind() {
+    let mut rt = runtime(scenes::references, false);
+    assert!(rt.find("reference-missing").is_none());
+    let removes: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("reference-remove")).map(|e| e.rect).collect();
+    let last = removes[2];
+    rt.pointer_down(last[0] + last[2] / 2.0, last[1] + last[3] / 2.0);
+    rt.pointer_up(last[0] + last[2] / 2.0, last[1] + last[3] / 2.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.references.len(), 2);
+    assert_eq!(text_of(&rt, "reference-missing"), "The prompt mentions <Picture 3>, but only 2 attached.");
+}
+
+#[test]
+fn a_picture_that_cannot_be_read_holds_generate_back() {
+    let mut rt = runtime(scenes::references, false);
+    let path = rt.state.references[0].path.clone();
+    rt.update(move |s, _| s.reference_thumb(&path, Err("unsupported format".into())));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.request().unwrap_err(), "street.jpg isn't a picture mmh3 can read. Remove it first.");
+}
+
+#[test]
+fn edit_this_picture_attaches_the_finished_png() {
+    let mut rt = runtime(scenes::gallery, false);
+    tap(&mut rt, "edit-picture");
+    assert_eq!(rt.state.references.len(), 1);
+    assert_eq!(rt.state.references[0].path, rt.state.selected_gen().and_then(|g| g.file().cloned()).unwrap());
+}

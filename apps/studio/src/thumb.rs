@@ -60,6 +60,22 @@ pub fn thumbnail(png: &[u8]) -> Result<image::RgbaImage, String> {
     image::RgbaImage::from_raw(tw, th, pixels).ok_or_else(|| "The thumbnail's size didn't add up.".to_owned())
 }
 
+/// A thumbnail of a reference picture, PNG or JPEG, turned the way its EXIF says, as mmh3 turns
+/// it before it reads it.
+pub fn reference(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    use image::ImageDecoder;
+
+    if bytes.starts_with(b"\x89PNG") {
+        return thumbnail(bytes);
+    }
+    let mut decoder =
+        image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?.into_decoder().map_err(|e| e.to_string())?;
+    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let mut picture = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    picture.apply_orientation(orientation);
+    Ok(picture.thumbnail(SIDE, SIDE).to_rgba8())
+}
+
 /// Decodes the whole image first; for the rare PNG that can't be read a row at a time.
 fn whole(png: &[u8]) -> Result<image::RgbaImage, String> {
     let full = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
@@ -88,6 +104,17 @@ mod tests {
         let diff: u64 = rows.as_raw().iter().zip(full.as_raw()).map(|(a, b)| u64::from(a.abs_diff(*b))).sum();
         let mean = diff as f64 / rows.as_raw().len() as f64;
         assert!(mean < 4.0, "mean difference {mean}");
+    }
+
+    #[test]
+    fn a_reference_thumbnail_reads_png_and_jpeg() {
+        let png = crate::mock::paint(640, 320, 3);
+        assert_eq!(reference(&png).unwrap().dimensions(), (256, 128));
+        let rgb = image::load_from_memory(&png).unwrap().to_rgb8();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&rgb).unwrap();
+        assert_eq!(reference(&jpeg).unwrap().dimensions(), (256, 128));
+        assert!(reference(b"GIF89a").is_err());
     }
 
     #[test]

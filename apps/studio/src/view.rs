@@ -64,6 +64,8 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
         actions = actions.child(act(&icons::SAVE, "save", "Save PNG…", !done, Box::new(move |s, tx| s.save(&i, tx))));
         let i = id.clone();
         actions = actions.child(act(&icons::REVEAL, "reveal", "Reveal in Finder", !done, Box::new(move |s, _| s.reveal(&i))));
+        let i = id.clone();
+        actions = actions.child(act(&icons::PICTURE, "edit-picture", "Edit this picture", !done, Box::new(move |s, _| s.edit_picture(&i))));
         let known = g.request.is_some();
         let prompt = g.prompt().to_owned();
         actions = actions.child(act(&icons::COPY, "copy-prompt", "Copy prompt", !known, Box::new(move |_, tx| tx.copy(prompt.clone()))));
@@ -95,6 +97,7 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
     let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
     let item = |label: &str| rune_kit::MenuItem::new(label);
     let known = g.request.is_some();
+    let edit = id.to_owned();
     let (a, b, c, d, e, f) =
         (id.to_owned(), id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
     context_menu("gallery-menu", trigger, Some(at))
@@ -105,6 +108,10 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
         .item(item("Reveal in Finder").icon(&icons::REVEAL).disabled(!done).on_select(move |s: &mut State| {
             s.menu = None;
             s.reveal(&b);
+        }))
+        .item(item("Edit this picture").icon(&icons::PICTURE).disabled(!done).on_select(move |s: &mut State| {
+            s.menu = None;
+            s.edit_picture(&edit);
         }))
         .separator()
         .item(item("Copy prompt").icon(&icons::COPY).disabled(!known).on_select_tx(move |s: &mut State, tx| {

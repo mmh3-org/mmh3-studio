@@ -232,3 +232,11 @@ fn an_unanswered_probe_is_asked_again_and_a_stale_one_is_ignored() {
     s.probed("y", Probe::Picture(server("y", api::State::Queued)), 0.0);
     assert!(s.gens.is_empty(), "an answer nobody waits for is dropped");
 }
+
+#[test]
+fn the_tags_a_prompt_mentions_without_a_picture_are_found_once_each() {
+    assert_eq!(missing_pictures("no tags", 0), Vec::<usize>::new());
+    assert_eq!(missing_pictures("<Picture 1> and <Picture 2>", 2), Vec::<usize>::new());
+    assert_eq!(missing_pictures("<Picture 3> by <Picture 1>, then <Picture 3> and <Picture 0>", 1), [0, 3]);
+    assert_eq!(missing_pictures("<Picture x> and <Picture 2", 0), Vec::<usize>::new(), "only whole tags count");
+}

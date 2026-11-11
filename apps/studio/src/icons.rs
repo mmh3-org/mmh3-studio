@@ -42,3 +42,10 @@ pub static SPARKLE: Icon =
 stroked!(ZOOM_IN, "studio-zoom-in", "M7 4.75V9.25M4.75 7H9.25M10.25 10.25L13.25 13.25M12 7A5 5 0 1 1 2 7A5 5 0 1 1 12 7Z");
 stroked!(ZOOM_OUT, "studio-zoom-out", "M4.75 7H9.25M10.25 10.25L13.25 13.25M12 7A5 5 0 1 1 2 7A5 5 0 1 1 12 7Z");
 stroked!(FIT, "studio-fit", "M2.5 6V2.5H6M10 2.5H13.5V6M13.5 10V13.5H10M6 13.5H2.5V10");
+stroked!(
+    PICTURE,
+    "studio-picture",
+    "M3.5 2.5H12.5C13.05 2.5 13.5 2.95 13.5 3.5V12.5C13.5 13.05 13.05 13.5 12.5 13.5H3.5C2.95 13.5 2.5 13.05 2.5 12.5V3.5C2.5 2.95 2.95 2.5 3.5 2.5ZM2.5 11L6 7.5L10.5 12M9 10.5L10.5 9L13.5 12M10.25 5.75A0.75 0.75 0 1 1 10.25 5.74"
+);
+stroked!(PLUS, "studio-plus", "M8 3.5V12.5M3.5 8H12.5");
+stroked!(CLOSE, "studio-close", "M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5");

@@ -1,9 +1,10 @@
+use mmh3_studio::api::MAX_REFERENCES;
 use mmh3_studio::sizes::{PRESETS, megapixels};
-use rune::{El, Key, KeyEvent, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, TextArea, TextInput};
+use rune::{El, Key, KeyEvent, SurfaceFit, Tx, col, el, icon, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner, TextArea, TextInput};
 
 use crate::icons;
-use crate::state::{SizeChoice, State};
+use crate::state::{REFERENCE_EXTENSIONS, Reference, SizeChoice, State, Thumb, missing_pictures, picture_tag};
 
 pub const GENERATE_LABEL: &str = "⌘↩";
 
@@ -118,10 +119,115 @@ fn seed(s: &State, k: &Kit) -> El {
     out
 }
 
+fn reference_tile(i: usize, r: &Reference, k: &Kit) -> El {
+    let c = &k.c;
+    let n = i + 1;
+    let name = r.path.file_name().map_or_else(|| r.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut picture = col().key("reference-thumb").w_full().aspect_ratio(1.0).radius(6.0).fill(c.layer_02).border(0.5, c.border_muted).center();
+    picture = match &r.thumb {
+        Thumb::Ready(img) => picture.child(el().key("reference-image").w_full().h_full().pixels_fit(img.pixels(), SurfaceFit::Fill)),
+        Thumb::Loading => picture.child(Spinner::new().size(12.0).color(c.icon_faint).build(k)),
+        Thumb::Failed(why) => picture.border(1.0, c.danger.icon).child(text("!").font(k.ty.ui_medium).color(c.danger.fg)).help(why.clone()),
+    };
+    let remove = IconButton::new(&icons::CLOSE)
+        .variant(IconButtonVariant::Contrast)
+        .control_size(ControlSize::Mini)
+        .label(format!("Remove picture {n}"))
+        .help(format!("Remove {name}"))
+        .on_press(move |s: &mut State| s.remove_reference(i))
+        .build(k)
+        .key("reference-remove")
+        .pin(None, Some(4.0), Some(4.0), None);
+    let tag = Button::new(picture_tag(n))
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Mini)
+        .help(format!("Put {} in the prompt ({name})", picture_tag(n)))
+        .on_press(move |s: &mut State| s.insert_picture_tag(n))
+        .build(k)
+        .key("reference-tag")
+        .w_full();
+    col()
+        .key(format!("reference-{i}"))
+        .role("listitem")
+        .label(format!("Picture {n}, {name}"))
+        .w_full()
+        .min_w(0.0)
+        .gap(2.0)
+        .child(picture.child(remove))
+        .child(tag)
+}
+
+fn references(s: &State, k: &Kit) -> El {
+    let c = &k.c;
+    let count = s.references.len();
+    let header = row().w_full().center_y().justify_between().child(section("Pictures to edit", k)).child(
+        text(if count == 0 { String::new() } else { format!("{count} of {MAX_REFERENCES}") }).key("reference-count").font(k.ty.small).color(c.text_faint),
+    );
+    let add = |label: &str| {
+        Button::new(label)
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .icon(&icons::PLUS)
+            .disabled(count >= MAX_REFERENCES)
+            .on_press_tx(|_: &mut State, tx: &mut Tx| crate::state::ask_for_reference(tx))
+            .build(k)
+            .key("add-reference")
+    };
+    let mut zone = col().key("references").role("list").label("Pictures to edit").w_full().gap(10.0).padding(10.0).radius(8.0);
+    zone = if s.dropping {
+        zone.border(1.5, c.border_focus).fill(c.layer_02)
+    } else if count == 0 {
+        zone.border(1.0, c.border_base).border_dash(4.0, 3.0)
+    } else {
+        zone.border(1.0, c.border_muted)
+    };
+    if count == 0 {
+        zone = zone.items_center().child(icon(&icons::PICTURE, 18.0).color(c.icon_faint)).child(
+            text(format!("Drop PNG or JPEG pictures here to edit them, up to {MAX_REFERENCES}."))
+                .key("reference-empty")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap()
+                .align(rune::Align::Center),
+        );
+        zone = zone.child(add("Add picture…"));
+    } else {
+        let mut grid = row().key("reference-grid").w_full().equal_columns(3).gaps(8.0, 8.0);
+        for (i, r) in s.references.iter().enumerate() {
+            grid = grid.child(reference_tile(i, r, k));
+        }
+        zone = zone.child(grid).child(row().w_full().child(add("Add…")));
+    }
+    let mut out = col().w_full().gap(8.0).child(header).child(zone);
+    if count > 0 {
+        out = out.child(
+            text("The prompt refers to them as <Picture 1>, <Picture 2> and so on. Click a tag to put it in the prompt.")
+                .key("reference-hint")
+                .font(k.ty.small)
+                .color(c.text_faint)
+                .wrap(),
+        );
+    }
+    let missing = missing_pictures(&s.prompt.text, count);
+    if !missing.is_empty() {
+        let tags: Vec<String> = missing.iter().map(|&n| picture_tag(n)).collect();
+        let what = if count == 0 { "no pictures are attached".to_owned() } else { format!("only {count} attached") };
+        out = out.child(
+            text(format!("The prompt mentions {}, but {what}.", tags.join(", ")))
+                .key("reference-missing")
+                .role("alert")
+                .font(k.ty.small)
+                .color(c.warning.fg)
+                .wrap(),
+        );
+    }
+    out
+}
+
 pub fn composer(s: &State, k: &Kit) -> El {
     let prompt = TextArea::new(&s.prompt)
         .label("Prompt")
-        .placeholder("Describe the image…")
+        .placeholder("Describe the picture, or how to change the pictures below…")
         .width(None)
         .auto_grow(5, 14)
         .on_edit(|s: &mut State| &mut s.prompt)
@@ -168,7 +274,12 @@ pub fn composer(s: &State, k: &Kit) -> El {
         .padding(16.0)
         .gap(18.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        .on_drop_files(|s: &mut State, files, _tx| s.add_references(files))
+        .accepts_extensions(&REFERENCE_EXTENSIONS)
+        .on_drop_hover(|s: &mut State, over, _tx| s.dropping = over)
+        .on_drop_rejected(|s: &mut State, _files, _tx| s.note("mmh3 edits PNG and JPEG pictures.", None, true))
         .child(col().w_full().gap(8.0).child(section("Prompt", k)).child(prompt))
+        .child(references(s, k))
         .child(sizes(s, k))
         .child(seed(s, k))
         .child(col().w_full().gap(8.0).child(generate).child(text(queue).key("queue-note").font(k.ty.small).color(k.c.text_faint).wrap()))

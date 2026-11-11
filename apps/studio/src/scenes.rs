@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use mmh3_studio::api::{Generation, ImageRequest, Memory, State as Remote, Status};
 use mmh3_studio::mock::paint;
 
-use crate::state::{Conn, Gen, Phase, Picture, SizeChoice, State};
+use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
 type Scene = (&'static str, fn(&mut State));
 
@@ -18,6 +18,7 @@ pub const SCENES: &[Scene] = &[
     ("custom-size", custom_size),
     ("offline-selected", offline_selected),
     ("confirm-delete", confirm_delete),
+    ("references", references),
 ];
 
 pub fn status(busy: bool, queued: u32) -> Status {
@@ -150,4 +151,19 @@ pub fn offline_selected(s: &mut State) {
 pub fn confirm_delete(s: &mut State) {
     gallery(s);
     s.delete("7c01aa2e0003");
+}
+
+/// The composer with pictures attached to edit, their thumbnails painted in place.
+pub fn references(s: &mut State) {
+    gallery(s);
+    s.prompt.replace_text("<Picture 1> at night, the street lamps lit, with the fox from <Picture 2> sitting on the steps of <Picture 3>");
+    for (i, (name, seed)) in [("street.jpg", 21_u64), ("fox.png", 31_337), ("house.png", 912)].into_iter().enumerate() {
+        let png = paint(240, 160 + 40 * i as u32, seed);
+        let thumb = mmh3_studio::thumb::reference(&png).ok().map(|t| s.images.rgba(t.width(), t.height(), t.into_raw()));
+        if let Some(t) = &thumb {
+            let _ = t.wait();
+        }
+        let thumb = thumb.map_or(Thumb::Loading, Thumb::Ready);
+        s.references.push(Reference { path: PathBuf::from(format!("/Users/me/Pictures/{name}")), thumb });
+    }
 }
