@@ -60,6 +60,13 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     false
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn on_focus(s: &mut State, focused: bool, _: &mut Tx) {
+    if focused {
+        s.check_power();
+    }
+}
+
 fn spec() -> AppSpec<State> {
     AppSpec {
         min_size: Some((1040.0, 680.0)),
@@ -77,7 +84,7 @@ pub fn run() {
     rune::prewarm_gpu();
     let app = rune::App::new(spec());
     #[cfg(not(target_arch = "wasm32"))]
-    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true });
+    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true }).on_focus(on_focus);
     let handle = app.handle();
     let ready = handle.clone();
     app.init(move || {
@@ -88,9 +95,15 @@ pub fn run() {
         State::new(Some(net), images, server)
     })
     .on_ready(move |_| {
-        ready.update(|s, _| {
+        #[cfg(not(target_arch = "wasm32"))]
+        let watch = power::watch(ready.clone());
+        ready.update(move |s, _| {
             if let Some(net) = &s.net {
                 net.start();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                s.power_watch = Some(watch);
             }
         });
     })

@@ -20,6 +20,9 @@ ureq.workspace = true
 image = { workspace = true, features = ["png", "jpeg"] }
 png.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation.workspace = true
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys.workspace = true
 wasm-bindgen.workspace = true

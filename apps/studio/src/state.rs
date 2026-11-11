@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{self, Generation, ImageRequest, Status};
+use crate::power::{Issue, Power};
 use crate::sizes::{self, PRESETS, SizeError};
 use rune::machine::Effects;
 use rune::{Image, ImageCache, PointerPress, TextEdit, Tx};
@@ -246,6 +247,13 @@ pub struct State {
     pub elsewhere: HashMap<String, bool>,
     /// Generations the studio did not ask for and is asking the server about.
     pub probing: HashSet<String>,
+    /// How the Mac is powered, once read; the web build never reads it.
+    pub power: Option<Power>,
+    /// What the power banner was closed on; it comes back when something else holds the GPU
+    /// back.
+    pub power_dismissed: Vec<Issue>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub power_watch: Option<crate::power::Watch>,
     next_local: u64,
 }
 
@@ -297,6 +305,10 @@ impl State {
             watching: HashSet::new(),
             elsewhere: HashMap::new(),
             probing: HashSet::new(),
+            power: None,
+            power_dismissed: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            power_watch: None,
             next_local: 0,
         }
     }
@@ -668,6 +680,25 @@ impl State {
         match &self.net {
             Some(net) => net.delete(id),
             None => self.deleted(&id),
+        }
+    }
+
+    /// What holds the GPU back that the user hasn't closed the banner on yet: all of it, so
+    /// the banner reads whole, or nothing.
+    pub fn power_warning(&self) -> Vec<Issue> {
+        let issues = self.power.as_ref().map(Power::issues).unwrap_or_default();
+        if issues.iter().all(|i| self.power_dismissed.contains(i)) { Vec::new() } else { issues }
+    }
+
+    pub fn dismiss_power(&mut self) {
+        self.power_dismissed = self.power.as_ref().map(Power::issues).unwrap_or_default();
+    }
+
+    /// Reads the power state again now, as on returning to the window.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn check_power(&self) {
+        if let Some(w) = &self.power_watch {
+            w.check();
         }
     }
 

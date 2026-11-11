@@ -192,6 +192,127 @@ pub fn parse_large_chip(brand: &str) -> bool {
     brand.ends_with(" Max") || brand.ends_with(" Ultra")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{Watch, open_energy_settings, watch};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use std::process::Command;
+    use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+    use std::time::Duration;
+
+    use rune::AppHandle;
+
+    use super::{ENERGY_SETTINGS_URL, Power, Thermal, parse_high_available, parse_large_chip, parse_mode, parse_source};
+    use crate::state::State;
+
+    const EVERY: Duration = Duration::from_secs(30);
+
+    fn run(program: &str, args: &[&str]) -> String {
+        Command::new(program)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// What a Mac can't change while the studio runs.
+    #[derive(Clone, Copy)]
+    struct Machine {
+        high_available: bool,
+        large_chip: bool,
+    }
+
+    fn read_machine() -> Machine {
+        Machine {
+            high_available: parse_high_available(&run("/usr/bin/pmset", &["-g", "cap"])),
+            large_chip: parse_large_chip(&run("/usr/sbin/sysctl", &["-n", "machdep.cpu.brand_string"])),
+        }
+    }
+
+    fn read(machine: Machine) -> Power {
+        let (low_power, thermal) = process_info();
+        Power {
+            mode: parse_mode(&run("/usr/bin/pmset", &["-g"])),
+            high_available: machine.high_available,
+            large_chip: machine.large_chip,
+            low_power,
+            thermal,
+            source: parse_source(&run("/usr/bin/pmset", &["-g", "ps"]), &run("/usr/bin/pmset", &["-g", "ac"])),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn process_info() -> (bool, Thermal) {
+        use objc2_foundation::{NSProcessInfo, NSProcessInfoThermalState};
+        let info = NSProcessInfo::processInfo();
+        let thermal = match info.thermalState() {
+            NSProcessInfoThermalState::Fair => Thermal::Fair,
+            NSProcessInfoThermalState::Serious => Thermal::Serious,
+            NSProcessInfoThermalState::Critical => Thermal::Critical,
+            _ => Thermal::Nominal,
+        };
+        (info.isLowPowerModeEnabled(), thermal)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn process_info() -> (bool, Thermal) {
+        (false, Thermal::Nominal)
+    }
+
+    /// Asks for a fresh reading ahead of the next poll.
+    pub struct Watch(Sender<()>);
+
+    impl Watch {
+        pub fn check(&self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// Reads the power state every 30 seconds and whenever asked, landing it when it changes.
+    pub fn watch(handle: AppHandle<State>) -> Watch {
+        let (tx, rx) = channel();
+        let _ = rune::task::spawn("mmh3-power", move || {
+            let machine = read_machine();
+            let mut last = None;
+            loop {
+                let now = read(machine);
+                if last.as_ref() != Some(&now) {
+                    let power = now.clone();
+                    handle.update(move |s, _| s.power = Some(power));
+                    last = Some(now);
+                }
+                if !wait(&rx) {
+                    break;
+                }
+            }
+        });
+        Watch(tx)
+    }
+
+    /// `Tx::open_url` opens only web and mail links, so System Settings' own scheme goes
+    /// through `open`.
+    pub fn open_energy_settings() {
+        let _ = rune::task::spawn("mmh3-energy-settings", || {
+            let _ = Command::new("/usr/bin/open").arg(ENERGY_SETTINGS_URL).status();
+        });
+    }
+
+    /// Waits out the poll or a request, taking every request queued meanwhile; false once the
+    /// studio has gone.
+    fn wait(rx: &Receiver<()>) -> bool {
+        match rx.recv_timeout(EVERY) {
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                rx.try_iter().for_each(drop);
+                true
+            }
+            Err(RecvTimeoutError::Disconnected) => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

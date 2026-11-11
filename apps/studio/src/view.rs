@@ -38,6 +38,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(k.c.page)
         .on_layout(|s: &mut State, r: [f32; 4]| s.width = r[2])
         .child(col().key("split").w_full().grow(1.0).min_h(0.0).child(panes))
+        .children(power_banner(s, k))
         .child(status_bar(s, k));
     rune_kit::root(body, layer)
 }
@@ -286,5 +287,87 @@ fn status_bar(s: &State, k: &Kit) -> El {
     if let Conn::Unreadable(why) = &s.conn {
         bar = bar.child(sep()).child(item("status-error", why.clone(), c.text_faint));
     }
+    if let Some(p) = s.power.as_ref().filter(|p| !p.summary().is_empty()) {
+        let slowed = !p.issues().is_empty();
+        let mark = el().key("status-power-dot").size(8.0, 8.0).radius(4.0).fill(if slowed { c.warning.icon } else { c.success.icon }).a11y_hidden();
+        bar = bar.child(el().grow(1.0)).child(row().key("status-power").gap(6.0).center_y().shrink().min_w(0.0).child(mark).child(item(
+            "status-power-text",
+            p.summary(),
+            c.text_faint,
+        )));
+    }
     bar
+}
+
+/// Only the native build reads the power state, so on the web this is always empty.
+fn power_banner(s: &State, k: &Kit) -> Option<El> {
+    use crate::power::HIGH_POWER_COMMAND;
+
+    let issues = s.power_warning();
+    if issues.is_empty() {
+        return None;
+    }
+    let c = &k.c;
+    let causes = issues.iter().map(|i| i.describe()).collect::<Vec<_>>().join(" ");
+    let words = col()
+        .key("power-words")
+        .gap(2.0)
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .child(text("The GPU is held back, so generations run slower").key("power-title").font(k.ty.ui_medium).color(c.warning.fg).wrap())
+        .child(
+            text(format!("{causes} macOS keeps the GPU at a low clock, which often makes a generation two to three times slower."))
+                .key("power-detail")
+                .font(k.ty.small)
+                .color(c.warning.fg)
+                .wrap(),
+        );
+    let mut actions = row().key("power-actions").gap(6.0).center_y();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        actions = actions.child(
+            Button::new("Open Energy settings")
+                .variant(ButtonVariant::Outline)
+                .on_press(|_: &mut State| crate::power::open_energy_settings())
+                .build(k)
+                .key("power-settings"),
+        );
+    }
+    if issues.iter().any(|i| i.is_mode()) {
+        actions = actions.child(
+            Button::new("Copy command")
+                .variant(ButtonVariant::Outline)
+                .icon(&icons::COPY)
+                .help(HIGH_POWER_COMMAND)
+                .on_press_tx(|_: &mut State, tx| tx.copy(HIGH_POWER_COMMAND.to_owned()))
+                .build(k)
+                .key("power-copy-command"),
+        );
+    }
+    let close = IconButton::new(&icons::CLOSE)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Dismiss")
+        .help("Dismiss")
+        .on_press(State::dismiss_power)
+        .build(k)
+        .key("power-dismiss");
+    Some(
+        row()
+            .key("power-banner")
+            .role("alert")
+            .label("The GPU is held back")
+            .w_full()
+            .px(16.0)
+            .py(10.0)
+            .gaps(12.0, 8.0)
+            .center_y()
+            .flex_wrap()
+            .border_sides([0.0, 1.0, 0.0, 0.0], c.warning.border)
+            .fill(c.warning.bg)
+            .child(el().size(8.0, 8.0).radius(4.0).fill(c.warning.icon).a11y_hidden())
+            .child(words)
+            .child(actions)
+            .child(close),
+    )
 }

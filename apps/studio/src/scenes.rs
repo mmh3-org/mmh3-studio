@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status};
 use crate::mock::paint;
+use crate::power::{Mode, Power, Source};
 
 use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
@@ -19,6 +20,7 @@ pub const SCENES: &[Scene] = &[
     ("offline-selected", offline_selected),
     ("confirm-delete", confirm_delete),
     ("references", references),
+    ("power", power),
 ];
 
 pub fn status(busy: bool, queued: u32) -> Status {
@@ -166,4 +168,17 @@ pub fn references(s: &mut State) {
         let thumb = thumb.map_or(Thumb::Loading, Thumb::Ready);
         s.references.push(Reference { path: PathBuf::from(format!("/Users/me/Pictures/{name}")), thumb });
     }
+}
+
+/// A laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which can't keep
+/// its battery up under a generation.
+pub fn power(s: &mut State) {
+    running(s);
+    s.power = Some(Power {
+        mode: Some(Mode::Automatic),
+        high_available: true,
+        large_chip: true,
+        source: Some(Source::Adapter { watts: Some(90), draining: true }),
+        ..Power::default()
+    });
 }

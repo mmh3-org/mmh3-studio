@@ -328,3 +328,49 @@ fn a_phone_wide_window_shows_one_pane_at_a_time() {
     assert!(wide.find("pane-picker").is_none());
     assert!(wide.find("composer").is_some() && wide.find("main").is_some());
 }
+
+#[test]
+fn the_power_banner_names_the_causes_offers_the_fixes_and_stays_closed() {
+    let mut rt = runtime(scenes::power, false);
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    let detail = text_of(&rt, "power-detail");
+    assert!(detail.contains("Energy Mode is Automatic"), "{detail}");
+    assert!(detail.contains("90 W adapter"), "{detail}");
+    assert!(text_of(&rt, "status-power-text").contains("Automatic power, 90 W adapter"));
+    let (x, y) = rt.find("power-copy-command").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(clipboard.text().as_deref().map(String::as_str), Some(power::HIGH_POWER_COMMAND));
+    let (x, y) = rt.find("power-dismiss").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("power-banner").is_none());
+    assert!(rt.find("status-power").is_some(), "the status bar still says");
+    rt.update(|s, _| {
+        if let Some(p) = &mut s.power {
+            p.source = Some(power::Source::Battery);
+        }
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("power-banner").is_some(), "a new cause brings it back");
+}
+
+#[test]
+fn a_mac_at_full_speed_shows_no_banner_and_no_command() {
+    let mut rt = runtime(scenes::power, false);
+    rt.update(|s, _| {
+        s.power = Some(power::Power {
+            mode: Some(power::Mode::High),
+            high_available: true,
+            large_chip: true,
+            source: Some(power::Source::Adapter { watts: Some(140), draining: false }),
+            ..Default::default()
+        });
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("power-banner").is_none());
+    assert_eq!(text_of(&rt, "status-power-text"), "High Power Mode, 140 W adapter");
+}
