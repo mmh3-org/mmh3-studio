@@ -2,29 +2,29 @@
 
 A native macOS client for a resident `mmh3 server` running MiniMax-H3-Image. The server keeps the text encoder, DiT and VAE loaded, so a generation never pays a cold start. The studio never loads a model itself. It is built with [Rune](https://github.com/anomalyco/rune), pinned to a `dev` revision in `Cargo.toml`.
 
-This folder is a standalone Cargo project with its own `[workspace]` table, so it is not part of the mmh3 workspace. `flake.nix` supplies Rust 1.99.1.
+The studio is a member of the repository's Cargo workspace. The root flake's dev shell supplies Rust 1.99.1 and `just`; with direnv it loads on entering the repository.
 
 ## Running it
 
-Start the server from your mmh3 checkout:
+Start the server. The flake builds mmh3 with Metal, so `just server` runs it with the models in `$MMH3_MODELS`, or in `./models` when that is unset:
 
 ```sh
-export MMH3_MODELS=$PWD/models
-target/release/mmh3 server
+MMH3_MODELS=/path/to/models just server
 ```
 
-Then start the studio:
+Then start the studio, or run it without a checkout through `nix run github:ryoppippi/mmh3-studio`:
 
 ```sh
-nix develop path:$PWD -c cargo run --release
+just studio::run
 ```
 
-The studio connects to `http://127.0.0.1:8833`. To use another address, pass `-- --server http://host:port` or set `MMH3_SERVER`. If the server isn't running, the studio shows the command that starts it and tries again every two seconds.
+The studio connects to `http://127.0.0.1:8833`. To use another address, pass `--server http://host:port` or set `MMH3_SERVER`. If the server isn't running, the studio shows the command that starts it and tries again every two seconds.
 
 To try the studio without the engine, run the mock server in place of `mmh3 server`. It implements the same API in image mode: six timed steps, then a painted PNG. A prompt that contains `[fail]` fails.
 
 ```sh
-nix develop path:$PWD -c cargo run --release --bin mock-server -- --listen 127.0.0.1:8833 --step 0.6
+just studio::mock-server   # in place of `just server`
+just studio::run-mock      # or the mock and the studio together
 ```
 
 ## Using it
@@ -39,12 +39,12 @@ Generated PNGs go into the app's cache folder (`~/Library/Caches/dev.mmh3.studio
 ## Checks
 
 ```sh
-nix develop path:$PWD -c cargo test --release      # client, mock, state machine and UI tests
-nix develop path:$PWD -c cargo clippy --release --all-targets
-nix develop path:$PWD -c sh scripts/screenshots.sh # headless PNGs and element trees in screenshots/
+just studio::test        # client, mock, state machine and UI tests
+just check               # formatting, typos, clippy and the tests, through Nix
+just studio::screenshots # headless PNGs and element trees in screenshots/
 ```
 
-`scripts/screenshots.sh` first renders the fixture scenes, which never touch the network:
+The screenshot script first renders the fixture scenes, which never touch the network:
 
 - `empty`
 - `disconnected`
@@ -57,5 +57,5 @@ nix develop path:$PWD -c sh scripts/screenshots.sh # headless PNGs and element t
 It then runs the studio headless with `--realtime` against the mock server. In that run, `scripts/generate.json` queues two 16 MP generations. To render a single scene:
 
 ```sh
-target/release/mmh3-studio --snap out.png --scene gallery --theme dark --scale 2
+../../target/release/mmh3-studio --snap out.png --scene gallery --theme dark --scale 2
 ```

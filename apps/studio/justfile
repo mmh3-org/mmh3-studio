@@ -1,0 +1,35 @@
+# Recipes for the studio. Run from the repo root as `just studio::<recipe>`,
+# or from this directory as `just <recipe>`.
+
+[private]
+default:
+    @just --list
+
+# Run the studio against a server (default: $MMH3_SERVER or 127.0.0.1:8833)
+[positional-arguments]
+run *args:
+    cargo run --release --bin mmh3-studio -- "$@"
+
+# Run the studio against a mock server started alongside it
+run-mock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --bin mmh3-studio --bin mock-server
+    bin="${CARGO_TARGET_DIR:-../../target}/release"
+    "$bin/mock-server" --listen 127.0.0.1:8833 --step 0.6 &
+    mock=$!
+    trap 'kill "$mock"' EXIT
+    "$bin/mmh3-studio" --server http://127.0.0.1:8833
+
+# Serve the mmh3 API from the mock, without the engine
+mock-server listen="127.0.0.1:8833" step="0.6":
+    cargo run --release --bin mock-server -- --listen {{listen}} --step {{step}}
+
+# Run the client, mock, state machine and UI tests
+test:
+    cargo test --release
+
+# Render the headless scenes and a live mock run into screenshots/
+screenshots:
+    cargo build --release --bin mmh3-studio --bin mock-server
+    sh scripts/screenshots.sh
