@@ -254,19 +254,31 @@ pub fn parse_busy(ps: &str, skip_pid: u32) -> Vec<Process> {
             let (cpu, comm) = rest.split_once(char::is_whitespace)?;
             let (pid, cpu) = (pid.parse().ok()?, cpu.parse().ok()?);
             let comm = comm.trim();
-            (cpu > BUSY_CPU && pid != skip_pid && !is_system(comm)).then(|| Process { pid, cpu, name: process_name(comm) })
+            if cpu <= BUSY_CPU || pid == skip_pid {
+                return None;
+            }
+            Some(Process { pid, cpu, name: closable_name(comm)? })
         })
         .filter(|p| p.name != "mmh3")
         .collect()
 }
 
-fn is_system(comm: &str) -> bool {
-    comm == "kernel_task" || ["/System/", "/sbin/", "/usr/sbin/", "/usr/libexec/"].iter().any(|dir| comm.starts_with(dir))
-}
-
-fn process_name(comm: &str) -> String {
+/// What to call a process the user could close, or `None` for part of macOS. `WebKit` runs every
+/// web page, Safari's included, from /System/Library, and Safari and the other bundled apps
+/// live under a /System/Applications folder, so those count as the user's.
+fn closable_name(comm: &str) -> Option<String> {
+    let file = comm.rsplit('/').next().unwrap_or(comm);
+    if ["com.apple.WebKit.WebContent", "com.apple.WebKit.GPU"].iter().any(|web| file.starts_with(web)) {
+        return Some("A web page".into());
+    }
+    let system = comm == "kernel_task"
+        || (comm.starts_with("/System/") && !comm.contains("/System/Applications/"))
+        || ["/sbin/", "/usr/sbin/", "/usr/libexec/"].iter().any(|dir| comm.starts_with(dir));
+    if system {
+        return None;
+    }
     let app = comm.split('/').find_map(|part| part.strip_suffix(".app")).filter(|name| !name.is_empty());
-    app.unwrap_or_else(|| comm.rsplit('/').next().unwrap_or(comm)).to_owned()
+    Some(app.unwrap_or(file).to_owned())
 }
 
 /// The busiest process heavy in both samples: one that stays busy across two polls, not a
@@ -481,8 +493,8 @@ mod tests {
     fn heavy_processes_leave_out_the_studio_mmh3_and_macos() {
         let busy = parse_busy(PROCESSES_BUSY, STUDIO_PID);
         let names: Vec<&str> = busy.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Google Chrome", "bun"]);
-        assert_eq!(busy[1], Process { pid: 61207, cpu: 101.3, name: "bun".into() });
+        assert_eq!(names, ["A web page", "Safari", "Google Chrome", "bun"]);
+        assert_eq!(busy[3], Process { pid: 61207, cpu: 101.3, name: "bun".into() });
         assert_eq!(parse_busy(PROCESSES_QUIET, STUDIO_PID), []);
         assert_eq!(parse_busy("", STUDIO_PID), []);
     }
@@ -493,9 +505,9 @@ mod tests {
         let quiet = parse_busy(PROCESSES_QUIET, STUDIO_PID);
         assert_eq!(sustained(&quiet, &busy), None, "a single poll may be a spike");
         assert_eq!(sustained(&busy, &busy).as_deref(), Some("bun"), "the busiest of them");
-        assert_eq!(sustained(&busy, &busy[..1]).as_deref(), Some("Google Chrome"));
+        assert_eq!(sustained(&busy, &busy[2..3]).as_deref(), Some("Google Chrome"));
         assert_eq!(sustained(&busy, &quiet), None, "it calmed down");
-        let restarted = [Process { pid: 70001, ..busy[1].clone() }];
+        let restarted = [Process { pid: 70001, ..busy[3].clone() }];
         assert_eq!(sustained(&busy, &restarted), None, "a new process with the same name starts over");
     }
 

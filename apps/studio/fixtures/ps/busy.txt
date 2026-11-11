@@ -3,6 +3,10 @@
     1   2.6 /sbin/launchd
   115   0.0 /System/Library/PrivateFrameworks/FileProviderDaemon.framework/XPCServices/FPCKService.xpc/Contents/MacOS/FPCKService
   702  58.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1186  77.5 /System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent
+ 1190  12.0 /System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking
+ 1195  54.2 /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari
+ 1198  66.0 /System/Library/PrivateFrameworks/CascadeSets.framework/Versions/A/XPCServices/CascadeSetsService.xpc/Contents/MacOS/CascadeSetsService
  1205   9.1 /System/Library/CoreServices/MenuBarAgent.app/Contents/MacOS/MenuBarAgent
  4410  71.0 /Users/me/.local/bin/mmh3
  4411  62.0 /Users/me/ghq/github.com/ryoppippi/mmh3-studio/target/release/mmh3-studio
