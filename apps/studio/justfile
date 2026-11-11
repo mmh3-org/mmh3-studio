@@ -34,6 +34,35 @@ screenshots:
     cargo build --release --bin mmh3-studio --bin mock-server
     sh scripts/screenshots.sh
 
+# Build the web studio into a static folder (default: target/web), served beside mmh3's /v1
+web-build out="../../target/web":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rune=$(just _rune)
+    mkdir -p "{{out}}"
+    cp ../studio-web/index.html "{{out}}/index.html"
+    bash "$rune/scripts/web-build.sh" mmh3-studio-web --out "{{out}}"
+    # web-build.sh finds Rune's full fonts through dep-info, which leaves out a git dependency's files.
+    cp "$rune"/crates/rune/assets/web/Inter-*.ttf "{{out}}/"
+
+# Rebuild the web studio on every change (fast, unoptimised); serve it with `web-serve ../../target/web-live`
+web-dev out="../../target/web-live":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rune=$(just _rune)
+    mkdir -p "{{out}}"
+    cp "$rune"/crates/rune/assets/web/Inter-*.ttf "{{out}}/"
+    bash "$rune/scripts/web-build.sh" mmh3-studio-web --dev --watch --out "{{out}}"
+
+# Serve a web build at / and pass /v1 to mmh3 server, on one origin (http://127.0.0.1:8000)
+web-serve dir="../../target/web" listen="127.0.0.1:8000" server="127.0.0.1:8833":
+    cargo run --release --bin web-proxy -- --dir {{dir}} --listen {{listen}} --server {{server}}
+
+# The checkout of the Rune revision Cargo.lock pins, which carries its web build script
+[private]
+_rune:
+    @dirname "$(dirname "$(dirname "$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name == "rune") | .manifest_path')")")"
+
 # Run the client against a real mmh3 server; it generates on the GPU, so take the GPU first
 test-real server="http://127.0.0.1:8833":
     MMH3_SERVER={{server}} cargo test --release --test real_server -- --ignored --nocapture --test-threads 1

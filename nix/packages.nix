@@ -7,12 +7,17 @@
       lib,
       pkgs,
       rustToolchain,
+      wasmBindgenCli,
       ...
     }:
     {
       packages = {
         default = config.packages.studio;
         studio = import ./studio.nix { inherit craneLib lib; };
+        studio-web = import ./studio-web.nix {
+          inherit craneLib lib wasmBindgenCli;
+          inherit (config.packages) studio;
+        };
         mmh3 = import ./mmh3.nix {
           inherit
             craneLib

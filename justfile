@@ -23,9 +23,9 @@ check:
 test:
     cargo test --workspace --release
 
-# Build the studio and the engine through Nix
+# Build the studio, its web build and the engine through Nix
 build:
-    nix build .#studio .#mmh3
+    nix build .#studio .#studio-web .#mmh3
 
 # Start the engine's server with the models in $MMH3_MODELS (default: ./models)
 [positional-arguments]

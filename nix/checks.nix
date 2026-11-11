@@ -17,6 +17,8 @@
           }
         );
         studio-test = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
+        # The wasm build is the only check that the web-only code compiles.
+        studio-web = config.packages.studio-web;
       };
     };
 }
