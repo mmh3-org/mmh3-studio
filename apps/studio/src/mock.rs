@@ -31,6 +31,8 @@ impl Default for Config {
 struct Job {
     generation: Generation,
     png: Option<Arc<Vec<u8>>>,
+    /// Every step and the end, so a slow event stream still sends each one, as the server does.
+    events: Vec<Generation>,
 }
 
 #[derive(Default)]
@@ -42,6 +44,7 @@ struct Jobs {
 struct Shared {
     jobs: Mutex<Jobs>,
     queued: Condvar,
+    changed: Condvar,
     config: Config,
 }
 
@@ -53,7 +56,12 @@ impl Shared {
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
         if let Some(job) = self.lock().list.iter_mut().find(|j| j.generation.id == id) {
             f(job);
+            let g = &job.generation;
+            if g.is_finished() || (g.state == State::Running && g.step.is_some()) {
+                job.events.push(g.clone());
+            }
         }
+        self.changed.notify_all();
     }
 }
 
@@ -61,7 +69,7 @@ impl Shared {
 pub fn spawn(addr: &str, config: Config) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
-    let shared = Arc::new(Shared { jobs: Mutex::new(Jobs::default()), queued: Condvar::new(), config });
+    let shared = Arc::new(Shared { jobs: Mutex::new(Jobs::default()), queued: Condvar::new(), changed: Condvar::new(), config });
     let worker = shared.clone();
     std::thread::Builder::new().name("mock-worker".into()).spawn(move || work(&worker))?;
     std::thread::Builder::new().name("mock-accept".into()).spawn(move || {
@@ -252,6 +260,7 @@ fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
                 Some(i) => {
                     jobs.list.remove(i);
                     drop(jobs);
+                    shared.changed.notify_all();
                     respond(&mut stream, 204, "text/plain", b"")
                 }
             }
@@ -317,7 +326,7 @@ fn create(shared: &Shared, request: &Request) -> Result<Generation, String> {
         seed: Some(seed),
         timings: None,
     };
-    jobs.list.push(Job { generation: generation.clone(), png: None });
+    jobs.list.push(Job { generation: generation.clone(), png: None, events: Vec::new() });
     shared.queued.notify_all();
     Ok(generation)
 }
@@ -344,20 +353,24 @@ fn events(mut stream: TcpStream, shared: &Shared, id: &str) -> std::io::Result<(
     }
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")?;
     stream.flush()?;
-    let mut last = None;
+    let mut sent = 0;
     loop {
-        let Some(g) = find(shared, id) else { return Ok(()) };
-        let mark = (g.state, g.step);
-        let worth = g.is_finished() || (g.state == State::Running && g.step.is_some());
-        if worth && last != Some(mark) {
-            last = Some(mark);
-            write!(stream, "data: {}\n\n", serde_json::to_string(&g).unwrap_or_default())?;
-            stream.flush()?;
-        }
-        if g.is_finished() {
+        let event = {
+            let mut jobs = shared.lock();
+            loop {
+                let Some(job) = jobs.list.iter().find(|j| j.generation.id == id) else { return Ok(()) };
+                if let Some(event) = job.events.get(sent) {
+                    break event.clone();
+                }
+                jobs = shared.changed.wait(jobs).unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        sent += 1;
+        write!(stream, "data: {}\n\n", serde_json::to_string(&event).unwrap_or_default())?;
+        stream.flush()?;
+        if event.is_finished() {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
