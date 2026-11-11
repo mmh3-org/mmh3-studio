@@ -687,7 +687,10 @@ impl State {
         let wanted = self.selected_gen().and_then(|g| g.file().map(|f| (g.id.clone(), f.clone())));
         self.preview = match wanted {
             Some((id, _)) if self.preview.as_ref().is_some_and(|(p, _)| *p == id) => self.preview.take(),
-            Some((id, file)) => Some((id, self.images.file(file, 0.0, 2.0))),
+            Some((id, file)) => {
+                let source = self.net.as_ref().map_or_else(|| file.clone(), |n| n.preview_source(&id, &file));
+                Some((id, self.images.file(source, 0.0, 2.0)))
+            }
             None => None,
         };
     }

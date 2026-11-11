@@ -4,7 +4,7 @@
 //! as futures on the page's one thread.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -17,8 +17,8 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    AbortSignal, Blob, DragEvent, EventSource, FileList, FormData, HtmlAnchorElement, HtmlInputElement, ImageBitmap, ImageBitmapOptions, ImageOrientation,
-    MessageEvent, OffscreenCanvas, OffscreenCanvasRenderingContext2d, RequestInit, ResizeQuality, Response,
+    AbortSignal, Blob, Cache, DragEvent, EventSource, FileList, FormData, HtmlAnchorElement, HtmlInputElement, ImageBitmap, ImageBitmapOptions,
+    ImageOrientation, MessageEvent, OffscreenCanvas, OffscreenCanvasRenderingContext2d, RequestInit, ResizeQuality, Response,
 };
 
 use super::{AfterStream, Queue, Requests, STATUS_EVERY, WATCH_RETRY, WATCH_RETRY_MAX, picture_kind, refresh_list};
@@ -33,6 +33,12 @@ const REQUESTS_KEY: &str = "mmh3-studio.requests";
 const QUICK: Duration = Duration::from_secs(5);
 /// The folder every picked or dropped picture is kept under, by the order it arrived in.
 const PICKED: &str = "picked";
+/// The Cache API store that keeps each finished picture's thumbnail between visits, so a reload
+/// downloads none of the pictures again. The browser offers it only to a secure context, which
+/// `localhost` and `tailscale serve` are; elsewhere every visit downloads them.
+const THUMBS: &str = "mmh3-studio-thumbs";
+/// Where a thumbnail is filed in [`THUMBS`], beside the page.
+const THUMB_PATH: &str = "studio-thumbs/";
 
 pub struct Net {
     inner: Rc<Inner>,
@@ -48,6 +54,9 @@ struct Inner {
     files: RefCell<HashMap<PathBuf, Blob>>,
     picked: Cell<u64>,
     dropping: Cell<bool>,
+    /// The last picture downloaded for the user to look at, as an object URL, so its preview
+    /// decodes it rather than downloading it again.
+    full: RefCell<Option<(String, String)>>,
 }
 
 impl Net {
@@ -60,6 +69,7 @@ impl Net {
             files: RefCell::default(),
             picked: Cell::new(0),
             dropping: Cell::new(false),
+            full: RefCell::default(),
         });
         listen_for_drops(&inner);
         Net { inner }
@@ -133,6 +143,7 @@ impl Net {
                 }
                 if refresh && let Ok(list) = inner.json::<Generations>("v1/generations").await {
                     polls_since_list = 0;
+                    prune_thumbs(&list.generations.iter().map(|g| g.id.clone()).collect()).await;
                     inner.handle.update(move |s, tx| {
                         tx.instant();
                         let now = tx.clock();
@@ -198,6 +209,15 @@ impl Net {
                 }
             });
         });
+    }
+
+    /// What the preview of generation `id` decodes: the picture already downloaded for it, or
+    /// its route on the server.
+    pub fn preview_source(&self, id: &str, file: &Path) -> PathBuf {
+        match &*self.inner.full.borrow() {
+            Some((held, object)) if held == id => PathBuf::from(object),
+            _ => file.to_owned(),
+        }
     }
 
     /// Queues the generation's picture, or moves it to the front when `urgent`.
@@ -293,6 +313,14 @@ impl Inner {
         let response = self.fetch("GET", &path.to_string_lossy(), None, None).await?;
         let blob = response.blob().map_err(|e| Error::Unreachable(js_error(&e)))?;
         Ok(JsFuture::from(blob).await.map_err(|e| Error::Unreachable(js_error(&e)))?.unchecked_into())
+    }
+
+    /// Holds the picture `blob` of generation `id` for its preview, letting go of the last one.
+    fn hold_full(&self, id: &str, blob: &Blob) {
+        let Ok(object) = web_sys::Url::create_object_url_with_blob(blob) else { return };
+        if let Some((_, old)) = self.full.replace(Some((id.to_owned(), object))) {
+            let _ = web_sys::Url::revoke_object_url(&old);
+        }
     }
 
     /// Keeps `blob` for this page under a name of its own; returns that name.
@@ -423,12 +451,9 @@ fn fetch_pictures(inner: &Rc<Inner>) {
     spawn_local(async move {
         loop {
             let next = inner.queue.borrow_mut().next();
-            let Some(id) = next else { break };
+            let Some((id, urgent)) = next else { break };
             let path = format!("v1/generations/{id}/image");
-            let answer = match inner.blob(Path::new(&path)).await {
-                Ok(blob) => thumbnail(&blob).await.map(|(w, h, rgba)| inner.images.rgba(w, h, rgba)),
-                Err(e) => Err(e.to_string()),
-            };
+            let answer = picture_thumb(&inner, &id, &path, urgent).await;
             if !inner.queue.borrow_mut().wanted.remove(&id) {
                 continue;
             }
@@ -439,6 +464,55 @@ fn fetch_pictures(inner: &Rc<Inner>) {
         }
         inner.fetching.set(false);
     });
+}
+
+/// A finished picture's thumbnail: the one kept from an earlier visit, or one made from the
+/// picture, which is downloaded once and, when the user waits for it, held for its preview.
+async fn picture_thumb(inner: &Inner, id: &str, path: &str, urgent: bool) -> Result<rune::Image, String> {
+    let cache = thumbs().await;
+    if let Some(cache) = &cache
+        && let Some(kept) = cached_thumb(cache, id).await
+        && let Ok((w, h, rgba, _)) = scaled(&kept).await
+    {
+        return Ok(inner.images.rgba(w, h, rgba));
+    }
+    let blob = inner.blob(Path::new(path)).await.map_err(|e| e.to_string())?;
+    let (w, h, rgba, canvas) = scaled(&blob).await?;
+    if urgent {
+        inner.hold_full(id, &blob);
+    }
+    if let Some(cache) = &cache
+        && let Ok(png) = canvas.convert_to_blob()
+        && let Ok(png) = JsFuture::from(png).await
+        && let Ok(response) = Response::new_with_opt_blob(Some(png.unchecked_ref()))
+    {
+        let _ = JsFuture::from(cache.put_with_str(&url(&format!("{THUMB_PATH}{id}.png")), &response)).await;
+    }
+    Ok(inner.images.rgba(w, h, rgba))
+}
+
+async fn thumbs() -> Option<Cache> {
+    let caches = web_sys::window()?.caches().ok()?;
+    JsFuture::from(caches.open(THUMBS)).await.ok().map(JsCast::unchecked_into)
+}
+
+async fn cached_thumb(cache: &Cache, id: &str) -> Option<Blob> {
+    let found = JsFuture::from(cache.match_with_str(&url(&format!("{THUMB_PATH}{id}.png")))).await.ok()?;
+    let response: Response = found.dyn_into().ok()?;
+    JsFuture::from(response.blob().ok()?).await.ok().map(JsCast::unchecked_into)
+}
+
+/// Drops the thumbnails of generations the server no longer lists.
+async fn prune_thumbs(listed: &HashSet<String>) {
+    let Some(cache) = thumbs().await else { return };
+    let Ok(keys) = JsFuture::from(cache.keys()).await else { return };
+    for request in js_sys::Array::from(&keys).iter() {
+        let kept = request.unchecked_into::<web_sys::Request>().url();
+        let Some(id) = kept.rsplit_once(THUMB_PATH).and_then(|(_, file)| file.strip_suffix(".png")) else { continue };
+        if !listed.contains(id) {
+            let _ = JsFuture::from(cache.delete_with_str(&kept)).await;
+        }
+    }
 }
 
 async fn probe(inner: &Inner, id: &str) -> Probe {
@@ -456,6 +530,11 @@ async fn probe(inner: &Inner, id: &str) -> Probe {
 /// A gallery thumbnail: the browser decodes the picture and scales it down off the main
 /// thread, so a 16 MP PNG costs the page only the small copy it reads back.
 async fn thumbnail(blob: &Blob) -> Result<(u32, u32, Vec<u8>), String> {
+    scaled(blob).await.map(|(w, h, rgba, _)| (w, h, rgba))
+}
+
+/// [`thumbnail`], with the canvas it was drawn on.
+async fn scaled(blob: &Blob) -> Result<(u32, u32, Vec<u8>, OffscreenCanvas), String> {
     let window = web_sys::window().ok_or("no window")?;
     let options = ImageBitmapOptions::new();
     options.set_image_orientation(ImageOrientation::FromImage);
@@ -478,7 +557,7 @@ async fn thumbnail(blob: &Blob) -> Result<(u32, u32, Vec<u8>), String> {
     context.draw_image_with_image_bitmap(&small, 0.0, 0.0).map_err(|e| js_error(&e))?;
     small.close();
     let pixels = context.get_image_data(0.0, 0.0, f64::from(w), f64::from(h)).map_err(|e| js_error(&e))?;
-    Ok((w, h, pixels.data().0))
+    Ok((w, h, pixels.data().0, canvas))
 }
 
 /// A reference's thumbnail, refused unless it is a PNG or JPEG: mmh3 reads only those, though

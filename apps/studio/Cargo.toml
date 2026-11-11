@@ -30,6 +30,8 @@ wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
   "AbortSignal",
   "Blob",
+  "Cache",
+  "CacheStorage",
   "DataTransfer",
   "Document",
   "DragEvent",
@@ -52,10 +54,12 @@ web-sys = { workspace = true, features = [
   "OffscreenCanvas",
   "OffscreenCanvasRenderingContext2d",
   "ReadableStream",
+  "Request",
   "RequestInit",
   "ResizeQuality",
   "Response",
   "Storage",
+  "Url",
   "Window",
 ] }
 

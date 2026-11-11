@@ -42,8 +42,9 @@ struct Queue {
 }
 
 impl Queue {
-    fn next(&mut self) -> Option<String> {
-        self.urgent.pop_front().or_else(|| self.backlog.pop_front())
+    /// The next picture to fetch, and whether the user waits for it.
+    fn next(&mut self) -> Option<(String, bool)> {
+        self.urgent.pop_front().map(|id| (id, true)).or_else(|| self.backlog.pop_front().map(|id| (id, false)))
     }
 
     fn unqueue(&mut self, id: &str) -> bool {

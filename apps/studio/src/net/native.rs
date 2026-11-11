@@ -126,7 +126,7 @@ impl Net {
         let (wake, rx) = channel::<()>();
         let (h, c, p, images_for_pictures) = (handle.clone(), client.clone(), pictures.clone(), images.clone());
         let _ = rune::task::serve("mmh3-pictures", rx, move |()| {
-            let Some(id) = p.lock().next() else { return ControlFlow::Continue(()) };
+            let Some((id, _)) = p.lock().next() else { return ControlFlow::Continue(()) };
             let answer = p.fetch(&c, &id);
             p.lock().wanted.remove(&id);
             let answer = match answer {
@@ -178,6 +178,12 @@ impl Net {
                 Err(e) => s.note("Couldn't attach the picture.", Some(e.to_string()), true),
             });
         });
+    }
+
+    /// What the preview of generation `id` decodes: its file in the cache.
+    #[expect(clippy::unused_self, reason = "the web Net hands over a picture it holds")]
+    pub fn preview_source(&self, _id: &str, file: &Path) -> PathBuf {
+        file.to_owned()
     }
 
     /// Asks the server whether a generation the studio did not ask for writes a picture.

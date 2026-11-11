@@ -62,7 +62,7 @@ If your Tailscale can't serve a folder (the sandboxed macOS app may not), serve 
 
 What changes in a browser:
 
-- There is no file system. Each picture is fetched from the server when it is shown, and the browser decodes it off the main thread, so a 16 MP preview never holds up a frame. What the studio asked for is kept in the browser's local storage for that address.
+- There is no file system. The first visit downloads each finished picture once to make its thumbnail, which the browser decodes and scales off the main thread; the thumbnails are kept in the browser's Cache Storage, so a later visit downloads none of them. Selecting a picture downloads it at full size for the preview, unless it was just downloaded for you. The browser decodes the preview off the main thread too, but copying a 16 MP picture's pixels into the page still takes the main thread a moment. Cache Storage needs a secure context, which `localhost` and `tailscale serve` are. What the studio asked for is kept in the browser's local storage for that address.
 - **Save PNG** downloads the picture, and there is no **Reveal in Finder** or dragging out.
 - Add pictures to edit with **Add picture…** or by dropping them anywhere on the page. They are kept for as long as the page is open, as is a picture attached with **Edit this picture**, so a re-run after a reload asks you to attach them again.
 - In a window narrower than 720 points, such as a phone, the gallery, the picture and the composer take turns, under a switcher at the top.
