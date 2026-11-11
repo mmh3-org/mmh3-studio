@@ -179,3 +179,21 @@ fn an_unreachable_server_is_reported_as_such() {
     let err = Client::new(format!("http://127.0.0.1:{port}")).status().unwrap_err();
     assert!(err.is_unreachable(), "{err:?}");
 }
+
+#[test]
+fn a_stream_that_falls_silent_is_given_up_as_unreachable() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0; 1024];
+        let _ = stream.read(&mut head);
+        stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n").unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+    });
+    let client = Client::with_silence(format!("http://127.0.0.1:{port}"), Duration::from_millis(300));
+    let err = client.events("g1", |_| {}).unwrap_err();
+    assert!(err.is_unreachable(), "{err:?}");
+    server.join().unwrap();
+}

@@ -18,6 +18,10 @@ pub const IMAGE_STEPS: u32 = 6;
 pub const MAX_REFERENCES: usize = 16;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PNG_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a stream or a picture may go without a byte before its connection is taken for dead.
+/// The server comments on an idle event stream every 15 s, so a live one never stays this quiet.
+#[cfg(not(target_arch = "wasm32"))]
+const SILENCE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -234,11 +238,21 @@ pub struct Client {
 #[cfg(not(target_arch = "wasm32"))]
 impl Client {
     pub fn new(base: impl Into<String>) -> Client {
+        Client::with_silence(base, SILENCE)
+    }
+
+    pub(crate) fn with_silence(base: impl Into<String>, silence: Duration) -> Client {
         let base = base.into().trim_end_matches('/').to_owned();
-        let agent = |global: Option<Duration>| -> ureq::Agent {
-            ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(2))).timeout_global(global).build().into()
+        let agent = |global: Option<Duration>, per_read: Option<Duration>| -> ureq::Agent {
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_connect(Some(Duration::from_secs(2)))
+                .timeout_global(global)
+                .timeout_per_read(per_read)
+                .build()
+                .into()
         };
-        Client { base, quick: agent(Some(Duration::from_secs(5))), upload: agent(Some(Duration::from_secs(120))), long: agent(None) }
+        Client { base, quick: agent(Some(Duration::from_secs(5)), None), upload: agent(Some(Duration::from_secs(120)), None), long: agent(None, Some(silence)) }
     }
 
     pub fn base(&self) -> &str {
