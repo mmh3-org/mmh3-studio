@@ -242,6 +242,10 @@ pub struct State {
     pub watching: HashSet<String>,
     /// What the studio asked each of its generations for, by the server's id.
     pub requests: HashMap<String, ImageRequest>,
+    /// Generations the server accepted from the studio that no list has shown yet. A list
+    /// fetched before the server took one can land after its answer, and must not read as the
+    /// server having dropped it.
+    pub unlisted: HashSet<String>,
     /// Generations the studio did not ask for, by whether they write a picture, once the
     /// server has said.
     pub elsewhere: HashMap<String, bool>,
@@ -303,6 +307,7 @@ impl State {
             clock: 0.0,
             tick: 0,
             watching: HashSet::new(),
+            unlisted: HashSet::new(),
             elsewhere: HashMap::new(),
             probing: HashSet::new(),
             power: None,
@@ -416,6 +421,9 @@ impl State {
         };
         let was_selected = self.selected.as_deref() == Some(local);
         let request = self.item(local).and_then(|g| g.request.clone());
+        if self.item(&created.id).is_none() {
+            self.unlisted.insert(created.id.clone());
+        }
         if let Some(r) = &request {
             self.requests.insert(created.id.clone(), r.clone());
             self.remember();
@@ -495,9 +503,11 @@ impl State {
     pub fn merge(&mut self, list: &[Generation], now: f64) {
         let mut old: Vec<Gen> = std::mem::take(&mut self.gens);
         let mut gens: Vec<Gen> = Vec::new();
+        let listed: HashSet<&str> = list.iter().map(|g| g.id.as_str()).collect();
+        self.unlisted.retain(|id| !listed.contains(id.as_str()));
         let mut i = 0;
         while i < old.len() {
-            if old[i].is_local() { gens.push(old.remove(i)) } else { i += 1 }
+            if old[i].is_local() || self.unlisted.contains(&old[i].id) { gens.push(old.remove(i)) } else { i += 1 }
         }
         let mut effects = Vec::new();
         let mut probe = Vec::new();
@@ -526,9 +536,8 @@ impl State {
             gens.push(item);
         }
         self.gens = gens;
-        let listed: HashSet<&str> = list.iter().map(|g| g.id.as_str()).collect();
         let before = self.requests.len();
-        self.requests.retain(|id, _| listed.contains(id.as_str()));
+        self.requests.retain(|id, _| listed.contains(id.as_str()) || self.unlisted.contains(id));
         if self.requests.len() != before {
             self.remember();
         }
@@ -541,7 +550,7 @@ impl State {
                 }
             }
         }
-        let gone: Vec<String> = old.into_iter().filter(|o| !o.is_local()).map(|o| o.id).collect();
+        let gone: Vec<String> = old.into_iter().map(|o| o.id).collect();
         if let (Some(net), false) = (&self.net, gone.is_empty()) {
             net.forget(&gone);
         }
@@ -650,6 +659,7 @@ impl State {
 
     pub fn deleted(&mut self, id: &str) {
         self.gens.retain(|g| g.id != id);
+        self.unlisted.remove(id);
         if self.requests.remove(id).is_some() {
             self.remember();
         }

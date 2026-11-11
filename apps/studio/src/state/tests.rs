@@ -170,6 +170,22 @@ fn a_list_that_lands_before_the_submit_answer_leaves_one_row() {
 }
 
 #[test]
+fn a_list_fetched_before_a_submission_lands_after_it_without_dropping_it() {
+    let mut s = online();
+    s.prompt.replace_text("a fox");
+    s.generate();
+    let local = s.gens[0].id.clone();
+    s.submitted(&local, Ok(server("srv1", api::State::Queued)), 1.0);
+    s.merge(&[server("old", api::State::Done)], 1.5);
+    assert!(s.item("srv1").is_some(), "a list from before the server took it says nothing of it");
+    assert_eq!(s.requests.get("srv1").map(|r| r.prompt.as_str()), Some("a fox"));
+    s.merge(&[server("srv1", api::State::Queued), server("old", api::State::Done)], 2.0);
+    s.merge(&[server("old", api::State::Done)], 3.0);
+    assert!(s.item("srv1").is_none(), "once listed, leaving the list means the server dropped it");
+    assert!(s.requests.is_empty());
+}
+
+#[test]
 fn a_status_the_studio_cannot_read_still_counts_as_connected() {
     let mut s = State::offline();
     s.set_status(Err(api::Error::Malformed("missing field `queued`".into())));
