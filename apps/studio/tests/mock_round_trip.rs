@@ -91,7 +91,9 @@ fn the_server_refuses_what_its_routes_refuse() {
     let client = quick_server();
     let g = client.create_image(&request("slow", 2)).unwrap();
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 409, ref message }) if message == "that generation has not written anything yet"));
-    std::thread::sleep(Duration::from_millis(60));
+    while client.generation(&g.id).unwrap().state != State::Running {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(matches!(client.delete(&g.id), Err(Error::Refused { status: 409, ref message }) if message == "that generation is running"));
     assert!(matches!(client.generation("nope"), Err(Error::Refused { status: 404, ref message }) if message == "no such generation"));
     assert!(matches!(client.events("nope", |_| {}), Err(Error::Refused { status: 404, .. })));
@@ -108,10 +110,16 @@ fn a_failing_prompt_ends_failed_with_its_reason() {
 
 #[test]
 fn queued_generations_wait_their_turn_and_list_most_recent_first() {
-    let client = quick_server();
+    // Steps long enough that the status read after the first step lands within the steps,
+    // however loaded the machine is.
+    let ms = Duration::from_millis;
+    let addr = mock::spawn("127.0.0.1:0", Config { text: ms(20), step: ms(150), decode: ms(20) }).unwrap();
+    let client = Client::new(format!("http://{addr}"));
     let a = client.create_image(&request("first", 1)).unwrap();
     let b = client.create_image(&request("second", 2)).unwrap();
-    std::thread::sleep(Duration::from_millis(40));
+    while client.generation(&a.id).unwrap().step.is_none() {
+        std::thread::sleep(ms(5));
+    }
     let status = client.status().unwrap();
     assert_eq!(status.generating.as_deref(), Some(a.id.as_str()));
     assert_eq!(status.queued, 1);
@@ -147,13 +155,18 @@ fn a_field_that_is_not_an_option_of_a_picture_is_refused_by_name() {
 #[test]
 fn a_video_has_no_picture() {
     use mmh3_studio::api::Part;
-    let client = quick_server();
+    // A text phase long enough that the status read once it runs lands within it.
+    let ms = Duration::from_millis;
+    let addr = mock::spawn("127.0.0.1:0", Config { text: ms(300), step: ms(10), decode: ms(10) }).unwrap();
+    let client = Client::new(format!("http://{addr}"));
     let (status, _, body) =
         post(&client, "/v1/generations", &[Part::Text { name: "prompt", value: "a fox".into() }, Part::Text { name: "steps", value: "1".into() }]);
     assert_eq!(status, 202);
     let g: Generation = serde_json::from_str(&body).unwrap();
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 404, ref message }) if message == "that generation writes a video"));
-    std::thread::sleep(Duration::from_millis(30));
+    while client.generation(&g.id).unwrap().state != State::Running {
+        std::thread::sleep(ms(5));
+    }
     assert_eq!(client.status().unwrap().models, None, "a video lends every model to its worker");
     assert_eq!(watch(&client, &g.id).last().map(|g| g.state), Some(State::Done));
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 404, .. })));
