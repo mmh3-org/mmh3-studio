@@ -33,3 +33,7 @@ test:
 screenshots:
     cargo build --release --bin mmh3-studio --bin mock-server
     sh scripts/screenshots.sh
+
+# Run the client against a real mmh3 server; it generates on the GPU, so take the GPU first
+test-real server="http://127.0.0.1:8833":
+    MMH3_SERVER={{server}} cargo test --release --test real_server -- --ignored --nocapture --test-threads 1

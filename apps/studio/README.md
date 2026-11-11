@@ -44,7 +44,10 @@ What the studio asked each server for is kept in `~/Library/Application Support/
 just studio::test        # client, mock, state machine and UI tests
 just check               # formatting, typos, clippy and the tests, through Nix
 just studio::screenshots # headless PNGs and element trees in screenshots/
+just studio::test-real   # the client against a real server with the picture models
 ```
+
+`test-real` generates two 1024×1024 pictures, the second an edit of the first, so it needs a server that serves pictures, and it uses the GPU.
 
 The screenshot script first renders the fixture scenes, which never touch the network:
 
