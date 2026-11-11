@@ -26,7 +26,7 @@ pub fn status(busy: bool, queued: u32) -> Status {
         generating: busy.then(|| "7c01aa2e0005".to_owned()),
         generations: 5,
         memory: Some(Memory { free: if busy { 61_400_000_000 } else { 84_100_000_000 }, total: 137_400_000_000 }),
-        models: (!busy).then(|| vec!["text_encoder".into(), "video_vae".into(), "dit".into()]),
+        models: Some(if busy { vec!["text_encoder".into(), "video_vae".into()] } else { vec!["text_encoder".into(), "video_vae".into(), "dit".into()] }),
         queued,
     }
 }

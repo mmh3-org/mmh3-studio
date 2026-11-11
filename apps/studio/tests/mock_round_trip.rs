@@ -115,7 +115,7 @@ fn queued_generations_wait_their_turn_and_list_most_recent_first() {
     let status = client.status().unwrap();
     assert_eq!(status.generating.as_deref(), Some(a.id.as_str()));
     assert_eq!(status.queued, 1);
-    assert_eq!(status.models, None);
+    assert_eq!(status.models.as_deref(), Some(&["text_encoder".to_owned(), "video_vae".to_owned()][..]), "a picture's steps hold no DiT in the table");
     let list = client.list().unwrap();
     assert_eq!(list[0].id, b.id, "most recent first");
     let mut first = None;
@@ -153,6 +153,8 @@ fn a_video_has_no_picture() {
     assert_eq!(status, 202);
     let g: Generation = serde_json::from_str(&body).unwrap();
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 404, ref message }) if message == "that generation writes a video"));
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(client.status().unwrap().models, None, "a video lends every model to its worker");
     assert_eq!(watch(&client, &g.id).last().map(|g| g.state), Some(State::Done));
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 404, .. })));
 }

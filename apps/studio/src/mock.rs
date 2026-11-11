@@ -16,6 +16,7 @@ use crate::api::{Generation, Generations, IMAGE_STEPS, MAX_REFERENCES, Memory, R
 /// What the server keeps after a picture: its text encoder, and its transformer and picture
 /// decoder in the tables of the video ones.
 const KEPT: [&str; 3] = ["text_encoder", "video_vae", "dit"];
+const KEPT_AFTER_VIDEO: [&str; 4] = ["text_encoder", "video_vae", "audio_vae", "dit"];
 const IMAGE_OPTIONS: [&str; 8] = ["prompt", "prompt-file", "reference", "width", "height", "min-generation-area", "seed", "attention-precision"];
 const IMAGE_FILE_OPTIONS: [&str; 2] = ["prompt-file", "reference"];
 const MACHINE_OPTIONS: [&str; 10] = ["models", "dit", "text-encoder", "video-vae", "audio-vae", "devices", "vram-budget", "worker", "worker-units", "token"];
@@ -95,7 +96,10 @@ struct Jobs {
     list: Vec<Job>,
     waiting: VecDeque<String>,
     count: u64,
-    kept: bool,
+    /// What `/v1/status` says is held. A picture takes each model out of its table while it uses
+    /// it, so the list shrinks as it runs and is `null` while it decodes; a video lends every
+    /// model to its worker, so it is `null` throughout.
+    held: Option<Vec<&'static str>>,
 }
 
 struct Shared {
@@ -109,6 +113,10 @@ struct Shared {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Jobs> {
         self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn hold(&self, models: Option<Vec<&'static str>>) {
+        self.lock().held = models;
     }
 
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
@@ -128,7 +136,8 @@ pub fn spawn(addr: &str, config: Config) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let shared = Arc::new(Shared { jobs: Mutex::new(Jobs::default()), queued: Condvar::new(), changed: Condvar::new(), config, started });
+    let jobs = Jobs { held: Some(Vec::new()), ..Jobs::default() };
+    let shared = Arc::new(Shared { jobs: Mutex::new(jobs), queued: Condvar::new(), changed: Condvar::new(), config, started });
     let worker = shared.clone();
     std::thread::Builder::new().name("mock-worker".into()).spawn(move || work(&worker))?;
     std::thread::Builder::new().name("mock-accept".into()).spawn(move || {
@@ -161,7 +170,7 @@ fn work(shared: &Shared) {
             Output::Picture => picture(shared, &id, &fields),
             Output::Video => video(shared, &id, &fields),
         };
-        shared.lock().kept = true;
+        shared.hold(Some(if output == Output::Picture { KEPT.to_vec() } else { KEPT_AFTER_VIDEO.to_vec() }));
         shared.update(&id, |j| {
             j.seconds = Some(started.elapsed().as_secs_f64());
             match ended {
@@ -226,10 +235,12 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Strin
         return Err(format!("pass at most {MAX_REFERENCES} --reference pictures"));
     }
     std::thread::sleep(shared.config.text);
+    shared.hold(Some(vec!["text_encoder", "video_vae"]));
     steps(shared, id, IMAGE_STEPS);
     if prompt.contains("[fail]") {
         return Err("The mock server was asked to fail.".into());
     }
+    shared.hold(None);
     let t = Instant::now();
     let png = paint(width as u32, height as u32, seed);
     std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
@@ -238,6 +249,7 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Strin
 
 fn video(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
     let n = number(fields, "steps", 8)? as u32;
+    shared.hold(None);
     std::thread::sleep(shared.config.text);
     steps(shared, id, n);
     std::thread::sleep(shared.config.decode);
@@ -410,11 +422,12 @@ fn status(shared: &Shared) -> Status {
     let jobs = shared.lock();
     let running = jobs.list.iter().find(|j| j.state == State::Running);
     let busy = running.is_some();
+    let held = jobs.held.clone();
     Status {
         generating: running.map(|j| j.id.clone()),
         generations: jobs.list.len() as u32,
         memory: Some(Memory { free: TOTAL_MEMORY - (38 << 30) - if busy { 21 << 30 } else { 0 }, total: TOTAL_MEMORY }),
-        models: (!busy).then(|| if jobs.kept { KEPT.iter().map(|m| (*m).to_owned()).collect() } else { Vec::new() }),
+        models: held.map(|m| m.iter().map(|m| (*m).to_owned()).collect()),
         queued: jobs.list.iter().filter(|j| j.state == State::Queued).count() as u32,
     }
 }
