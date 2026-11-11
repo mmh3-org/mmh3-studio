@@ -29,6 +29,44 @@ just studio::mock-server   # in place of `just server`
 just studio::run-mock      # or the mock and the studio together
 ```
 
+## In a browser
+
+The same app runs in a browser through Rune's experimental WebGPU target, so it needs a browser with WebGPU (current Chrome, Edge, Safari or Firefox) and a secure page: HTTPS, or plain HTTP on `localhost`. The page talks to the server on its own origin, at `v1/` beside the page, so it must be served from the same host as mmh3's `/v1` routes; mmh3 sends no CORS headers.
+
+Build the static folder with Nix or with `just`:
+
+```sh
+nix build .#studio-web       # into ./result
+just studio::web-build       # into target/web
+```
+
+To try it locally, serve the folder at `/` and pass `/v1/*` to the server with the small proxy in this repository, then open http://localhost:8000:
+
+```sh
+just server                  # or `just studio::mock-server` for the mock
+just studio::web-build
+just studio::web-serve       # target/web on 127.0.0.1:8000, /v1 to 127.0.0.1:8833
+```
+
+`web-serve` takes the folder, the address to listen on and the server's address, in that order, relative to `apps/studio`: `just studio::web-serve ../../result 127.0.0.1:8000 127.0.0.1:8833`. While working on the web build, `just studio::web-dev` rebuilds an unoptimised build into `target/web-live` on every change and reloads the page; serve that folder with `just studio::web-serve ../../target/web-live`.
+
+To use it from your other devices, let [Tailscale Serve](https://tailscale.com/kb/1312/serve) put both on your tailnet's HTTPS name, the folder at `/` and the server's routes at `/v1`:
+
+```sh
+tailscale serve --bg --set-path / "$(nix build .#studio-web --print-out-paths)"
+tailscale serve --bg --set-path /v1 http://127.0.0.1:8833/v1
+tailscale serve status       # prints the https://<machine>.<tailnet>.ts.net/ address
+```
+
+If your Tailscale can't serve a folder (the sandboxed macOS app may not), serve the local proxy instead: run `just studio::web-serve` and then `tailscale serve --bg 8000`. `tailscale serve reset` takes either away. Serve stays inside your tailnet; don't use `tailscale funnel`, since the server has no authentication.
+
+What changes in a browser:
+
+- There is no file system. Each picture is fetched from the server when it is shown, and the browser decodes it off the main thread, so a 16 MP preview never holds up a frame. What the studio asked for is kept in the browser's local storage for that address.
+- **Save PNG** downloads the picture, and there is no **Reveal in Finder** or dragging out.
+- Add pictures to edit with **Add picture…** or by dropping them anywhere on the page. They are kept for as long as the page is open, so a re-run after a reload asks you to attach them again.
+- In a window narrower than 720 points, such as a phone, the gallery, the picture and the composer take turns, under a switcher at the top.
+
 ## Using it
 
 - **Composer:** write a prompt, then choose a size. The presets are 2048×2048 for a 4 MP draft, and 16 MP finals at 1:1, 4:3, 3:4, 16:9 and 9:16. A custom size takes multiples of 32, from 256 to 8192 pixels on each side. Set a seed or randomise it. To edit pictures, drop up to 16 PNG or JPEG files on the composer or add them with **Add picture…**; the prompt refers to them as `<Picture 1>`, `<Picture 2>` and so on, and clicking a picture's tag puts it in the prompt. The composer warns when the prompt mentions a picture that isn't attached. **Edit this picture** in the toolbar or a row's menu attaches a finished picture. ⌘↩ generates; plain Return starts a new line. You can queue as many generations as you like.
@@ -39,6 +77,8 @@ just studio::run-mock      # or the mock and the studio together
 What the studio asked each server for is kept in `~/Library/Application Support/dev.mmh3.studio/requests`, one file a server, and forgotten once the server no longer lists the generation. Generated PNGs go into the app's cache folder (`~/Library/Caches/dev.mmh3.studio/images`). Each PNG is downloaded once. Thumbnails are decoded off the UI thread and scaled down to 256 px. Only the selected image is kept at full resolution, and Rune decodes it with mipmaps on its own workers.
 
 ## Checks
+
+The flake's checks build the web studio as well, which is what checks the web-only code compiles.
 
 ```sh
 just studio::test        # client, mock, state machine and UI tests
