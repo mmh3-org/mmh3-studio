@@ -200,3 +200,35 @@ fn generate_needs_a_prompt_and_a_valid_size_and_seed() {
     s.seed.replace_text("");
     assert!(s.request().is_ok(), "an empty seed is a random one");
 }
+
+#[test]
+fn a_picture_asked_for_elsewhere_joins_the_gallery_in_queue_order_and_a_video_never_does() {
+    let mut s = knowing(online(), &["new", "old"]);
+    let at = |id: &str, queued| Generation { queued, ..server(id, api::State::Done) };
+    let list = [at("new", 30), at("theirs", 20), at("video", 15), at("old", 10)];
+    s.merge(&list, 0.0);
+    assert_eq!(s.gens.len(), 2);
+    s.probing.extend(["theirs".to_owned(), "video".to_owned()]);
+    s.probed("theirs", Probe::Picture(at("theirs", 20)), 1.0);
+    s.probed("video", Probe::NotAPicture, 1.0);
+    let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["new", "theirs", "old"]);
+    assert_eq!(s.gens[1].request, None);
+    assert_eq!(crate::gallery::title(&s.gens[1]), "Asked for elsewhere");
+
+    s.merge(&list, 2.0);
+    let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["new", "theirs", "old"], "the next list keeps it and still leaves the video out");
+    s.merge(&[at("new", 30)], 3.0);
+    assert!(s.elsewhere.is_empty(), "what the server forgot, the studio forgets");
+}
+
+#[test]
+fn an_unanswered_probe_is_asked_again_and_a_stale_one_is_ignored() {
+    let mut s = online();
+    s.probing.insert("x".into());
+    s.probed("x", Probe::Unanswered, 0.0);
+    assert!(s.probing.is_empty() && s.elsewhere.is_empty() && s.gens.is_empty());
+    s.probed("y", Probe::Picture(server("y", api::State::Queued)), 0.0);
+    assert!(s.gens.is_empty(), "an answer nobody waits for is dropped");
+}

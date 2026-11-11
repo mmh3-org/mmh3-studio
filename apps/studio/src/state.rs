@@ -77,6 +77,16 @@ pub fn step(phase: &mut Phase, g: &Generation, now: f64) -> Effects<Effect> {
     }
 }
 
+/// What the server says of a generation the studio did not ask for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Probe {
+    /// It writes a picture, and this is where it is now.
+    Picture(Generation),
+    /// It writes a video, or is gone.
+    NotAPicture,
+    Unanswered,
+}
+
 pub enum Picture {
     None,
     Loading,
@@ -89,6 +99,8 @@ pub struct Gen {
     /// What the studio asked for; the server never says, so a picture asked for elsewhere has
     /// none.
     pub request: Option<ImageRequest>,
+    /// When the server took it, which orders the gallery; none before it has.
+    pub queued: Option<u64>,
     pub phase: Phase,
     pub picture: Picture,
     pub revision: u64,
@@ -96,7 +108,7 @@ pub struct Gen {
 
 impl Gen {
     pub fn from_server(g: &Generation, request: Option<ImageRequest>, now: f64) -> Gen {
-        let mut item = Gen { id: g.id.clone(), request, phase: Phase::Queued, picture: Picture::None, revision: 0 };
+        let mut item = Gen { id: g.id.clone(), request, queued: Some(g.queued), phase: Phase::Queued, picture: Picture::None, revision: 0 };
         let _ = step(&mut item.phase, g, now);
         item
     }
@@ -169,6 +181,11 @@ pub struct State {
     pub watching: HashSet<String>,
     /// What the studio asked each of its generations for, by the server's id.
     pub requests: HashMap<String, ImageRequest>,
+    /// Generations the studio did not ask for, by whether they write a picture, once the
+    /// server has said.
+    pub elsewhere: HashMap<String, bool>,
+    /// Generations the studio did not ask for and is asking the server about.
+    pub probing: HashSet<String>,
     next_local: u64,
 }
 
@@ -209,6 +226,8 @@ impl State {
             clock: 0.0,
             tick: 0,
             watching: HashSet::new(),
+            elsewhere: HashMap::new(),
+            probing: HashSet::new(),
             next_local: 0,
         }
     }
@@ -288,7 +307,7 @@ impl State {
     pub fn submit(&mut self, r: ImageRequest) {
         self.next_local += 1;
         let id = format!("local-{}", self.next_local);
-        self.gens.insert(0, Gen { id: id.clone(), request: Some(r.clone()), phase: Phase::Sending, picture: Picture::None, revision: 0 });
+        self.gens.insert(0, Gen { id: id.clone(), request: Some(r.clone()), queued: None, phase: Phase::Sending, picture: Picture::None, revision: 0 });
         self.select(&id);
         if let Some(net) = &self.net {
             net.submit(id, r);
@@ -321,6 +340,7 @@ impl State {
         } else {
             let Some(g) = self.item_mut(local) else { return };
             g.id.clone_from(&created.id);
+            g.queued = Some(created.queued);
             g.revision += 1;
             self.apply(&created, now);
         }
@@ -393,6 +413,7 @@ impl State {
             if old[i].is_local() { gens.push(old.remove(i)) } else { i += 1 }
         }
         let mut effects = Vec::new();
+        let mut probe = Vec::new();
         for g in list {
             let item = match old.iter().position(|o| o.id == g.id) {
                 Some(at) => {
@@ -402,9 +423,14 @@ impl State {
                     effects.extend(fx.into_iter().map(|e| (g.id.clone(), e)));
                     item
                 }
-                None => match self.requests.get(&g.id) {
-                    Some(r) => Gen::from_server(g, Some(r.clone()), now),
-                    None => continue,
+                None => match (self.requests.get(&g.id), self.elsewhere.get(&g.id)) {
+                    (Some(r), _) => Gen::from_server(g, Some(r.clone()), now),
+                    (None, Some(true)) => Gen::from_server(g, None, now),
+                    (None, Some(false)) => continue,
+                    (None, None) => {
+                        probe.push(g.id.clone());
+                        continue;
+                    }
                 },
             };
             if item.phase.is_active() {
@@ -418,6 +444,15 @@ impl State {
         self.requests.retain(|id, _| listed.contains(id.as_str()));
         if self.requests.len() != before {
             self.remember();
+        }
+        self.elsewhere.retain(|id, _| listed.contains(id.as_str()));
+        self.probing.retain(|id| listed.contains(id.as_str()));
+        if let Some(net) = &self.net {
+            for id in probe {
+                if self.probing.insert(id.clone()) {
+                    net.probe(id);
+                }
+            }
         }
         let gone: Vec<String> = old.into_iter().filter(|o| !o.is_local()).map(|o| o.id).collect();
         if let (Some(net), false) = (&self.net, gone.is_empty()) {
@@ -440,6 +475,37 @@ impl State {
             self.fetch_image(&id, false);
         }
         self.trim_thumbs();
+    }
+
+    /// What the server said of a generation the studio did not ask for. One it could not
+    /// answer for is asked about again with the next list.
+    pub fn probed(&mut self, id: &str, answer: Probe, now: f64) {
+        if !self.probing.remove(id) {
+            return;
+        }
+        let g = match answer {
+            Probe::Unanswered => return,
+            Probe::NotAPicture => {
+                self.elsewhere.insert(id.to_owned(), false);
+                return;
+            }
+            Probe::Picture(g) => g,
+        };
+        self.elsewhere.insert(id.to_owned(), true);
+        if self.item(id).is_some() {
+            return;
+        }
+        let item = Gen::from_server(&g, None, now);
+        let at = self.gens.iter().position(|o| o.queued.is_some_and(|q| q < g.queued)).unwrap_or(self.gens.len());
+        let active = item.phase.is_active();
+        let done = matches!(item.phase, Phase::Done { .. });
+        self.gens.insert(at, item);
+        if active {
+            self.watch(id);
+        }
+        if done {
+            self.fetch_image(id, false);
+        }
     }
 
     pub fn picture_ready(&mut self, id: &str, file: PathBuf, thumb: Image) {

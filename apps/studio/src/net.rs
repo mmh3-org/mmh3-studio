@@ -14,7 +14,7 @@ pub type Requests = HashMap<String, ImageRequest>;
 use mmh3_studio::thumb::thumbnail;
 use rune::{AppHandle, ImageCache};
 
-use crate::state::State;
+use crate::state::{Probe, State};
 
 const STATUS_EVERY: Duration = Duration::from_secs(2);
 const WATCH_RETRY: Duration = Duration::from_millis(500);
@@ -79,6 +79,15 @@ impl Pictures {
         }
     }
 
+    /// Keeps a PNG the server sent, unless the generation was forgotten meanwhile.
+    fn store(&self, id: &str, png: &[u8]) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let part = self.dir.join(format!("{id}.png.part"));
+        std::fs::write(&part, png)?;
+        let _q = self.lock();
+        std::fs::rename(&part, self.file(id))
+    }
+
     /// The generation's PNG, from the cache folder or the server, and its thumbnail; `None`
     /// when the generation was forgotten while it was being fetched.
     fn fetch(&self, client: &Client, id: &str) -> Result<Option<(PathBuf, image::RgbaImage)>, String> {
@@ -115,6 +124,7 @@ pub struct Net {
     /// Where what the studio asked this server for is kept between runs.
     requests_file: PathBuf,
     remember: Sender<Requests>,
+    probes: Sender<String>,
 }
 
 impl Net {
@@ -151,12 +161,27 @@ impl Net {
             });
             ControlFlow::Continue(())
         });
-        Net { handle, client, pictures, wake, requests_file, remember }
+        let (probes, asked) = channel::<String>();
+        let (h, c, p) = (handle.clone(), client.clone(), pictures.clone());
+        let _ = rune::task::serve("mmh3-probe", asked, move |id| {
+            let answer = probe(&c, &p, &id);
+            h.update(move |s, tx| {
+                let now = tx.clock();
+                s.probed(&id, answer, now);
+            });
+            ControlFlow::Continue(())
+        });
+        Net { handle, client, pictures, wake, requests_file, remember, probes }
     }
 
     /// What the studio asked this server for in earlier runs, by the server's id.
     pub fn requests(&self) -> Requests {
         read_requests(&self.requests_file)
+    }
+
+    /// Asks the server whether a generation the studio did not ask for writes a picture.
+    pub fn probe(&self, id: String) {
+        let _ = self.probes.send(id);
     }
 
     /// Keeps `requests` for the next run, written in the order they were handed over.
@@ -309,6 +334,21 @@ impl Net {
     }
 }
 
+/// Whether generation `id` writes a picture, from how the server answers for its picture: a
+/// picture still to come or never to come is refused with 409, a video with 404. A picture
+/// already written is kept, since it was sent anyway.
+fn probe(client: &Client, pictures: &Pictures, id: &str) -> Probe {
+    match client.image(id) {
+        Ok(png) => {
+            let _ = pictures.store(id, &png);
+        }
+        Err(Error::Refused { status: 409, .. }) => {}
+        Err(Error::Refused { status: 404, .. }) => return Probe::NotAPicture,
+        Err(_) => return Probe::Unanswered,
+    }
+    client.generation(id).map_or(Probe::Unanswered, Probe::Picture)
+}
+
 /// An unreadable file is as good as none: it only costs the prompts of old generations.
 fn read_requests(file: &std::path::Path) -> Requests {
     std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
@@ -356,5 +396,33 @@ mod tests {
         std::fs::write(&file, b"{not json").unwrap();
         assert!(read_requests(&file).is_empty());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_probe_tells_pictures_from_videos_and_keeps_a_finished_png() {
+        use mmh3_studio::api::{Part, multipart};
+        use mmh3_studio::mock::{self, Config};
+
+        let ms = Duration::from_millis;
+        let addr = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10) }).unwrap();
+        let client = Client::new(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("mmh3-studio-probe-{}", std::process::id()));
+        let pictures = Pictures { dir: dir.clone(), queue: Mutex::default() };
+        let request = ImageRequest { prompt: "a fox".into(), seed: 1, width: 64, height: 64, min_generation_area: None, references: Vec::new() };
+
+        let done = client.create_image(&request).unwrap();
+        client.events(&done.id, |_| {}).unwrap();
+        let pending = client.create_image(&request).unwrap();
+        let (content_type, body) = multipart(&[Part::Text { name: "prompt", value: "a fox".into() }], "B");
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let mut answer = agent.post(&format!("{}/v1/generations", client.base())).header("Content-Type", &content_type).send(&body[..]).unwrap();
+        let video: Generation = serde_json::from_str(&answer.body_mut().read_to_string().unwrap()).unwrap();
+
+        assert!(matches!(probe(&client, &pictures, &done.id), Probe::Picture(g) if g.state == mmh3_studio::api::State::Done));
+        assert!(pictures.file(&done.id).is_file(), "the PNG it was sent is kept");
+        assert!(matches!(probe(&client, &pictures, &pending.id), Probe::Picture(_)));
+        assert_eq!(probe(&client, &pictures, &video.id), Probe::NotAPicture);
+        assert_eq!(probe(&Client::new("http://127.0.0.1:1"), &pictures, "x"), Probe::Unanswered);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
