@@ -160,6 +160,17 @@ pub struct Refusal {
     pub error: String,
 }
 
+/// The error for a response with a status outside 2xx and this body. A gateway's 502, 503 or
+/// 504 means whatever proxies the server (the web build's host, `tailscale serve`) couldn't
+/// reach it, which is the server not running, as a refused connection is natively.
+pub fn refusal(status: u16, body: &str) -> Error {
+    match serde_json::from_str::<Refusal>(body) {
+        Ok(r) => Error::Refused { status, message: r.error },
+        Err(_) if matches!(status, 502..=504) => Error::Unreachable(format!("the proxy in front of it couldn't reach it (HTTP {status})")),
+        Err(_) => Error::Refused { status, message: body.trim().to_owned() },
+    }
+}
+
 /// Builds a `multipart/form-data` body; returns it with its content type.
 pub fn multipart(parts: &[Part], boundary: &str) -> (String, Vec<u8>) {
     let mut body = Vec::new();
@@ -307,8 +318,7 @@ fn checked(answer: Answer) -> Result<ureq::http::Response<ureq::Body>, Error> {
         return Ok(response);
     }
     let body = response.body_mut().read_to_string().unwrap_or_default();
-    let message = serde_json::from_str::<Refusal>(&body).map_or_else(|_| body.trim().to_owned(), |r| r.error);
-    Err(Error::Refused { status, message })
+    Err(refusal(status, &body))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -164,6 +164,14 @@ fn a_refusal_reads_as_the_servers_words() {
 }
 
 #[test]
+fn a_gateway_that_cannot_reach_the_server_reads_as_unreachable() {
+    assert!(refusal(502, "Bad Gateway").is_unreachable());
+    assert!(refusal(504, "").is_unreachable());
+    assert_eq!(refusal(503, REFUSAL), Error::Refused { status: 503, message: "steps is not an option of a picture".into() });
+    assert_eq!(refusal(500, " boom\n"), Error::Refused { status: 500, message: "boom".into() });
+}
+
+#[test]
 fn an_unreachable_server_is_reported_as_such() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
