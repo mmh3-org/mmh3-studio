@@ -1,0 +1,5 @@
+ Wattage = 90W
+ Current = 4500mA
+ Voltage = 20000mV
+ AdapterID = 0
+ Family Code = 0xe000400a

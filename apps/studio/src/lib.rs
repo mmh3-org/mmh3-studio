@@ -1,6 +1,7 @@
 pub mod api;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
+pub mod power;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod proxy;
 pub mod sizes;

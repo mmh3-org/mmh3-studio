@@ -1,0 +1,5 @@
+ Wattage = 100W
+ Current = 5000mA
+ Voltage = 20000mV
+ AdapterID = 0
+ Family Code = 0xe000400a
