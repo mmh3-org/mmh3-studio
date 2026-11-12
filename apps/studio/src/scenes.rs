@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status, Timings};
+use crate::api::{Asked, Attention, Generation, ImageRequest, Memory, State as Remote, Status, Timings, Tuning};
 use crate::mock::{paint, preview};
 use crate::net::Feed;
 use crate::power::{Chip, Mode, Power, Source};
@@ -30,6 +30,7 @@ pub const SCENES: &[Scene] = &[
     ("effort", effort),
     ("effort-small", effort_small),
     ("effort-custom", effort_custom),
+    ("effort-details", effort_details),
 ];
 
 pub fn status(busy: bool, queued: u32) -> Status {
@@ -256,6 +257,19 @@ pub fn effort_custom(s: &mut State) {
     effort(s);
     s.effort = Effort::Custom;
     s.custom_effort = Custom { sol: true, sol_from: 4, draft_steps: 2, ..Custom::default() };
+}
+
+/// Where a Medium picture's time went, and what it asked for as the server reports it.
+pub fn effort_details(s: &mut State) {
+    timing(s);
+    if let Some(g) = s.gens.iter_mut().find(|g| g.id == "7c01aa2e0003") {
+        if let Some(r) = &mut g.request {
+            r.effort = Some(Effort::Medium);
+            r.tuning = Tuning { attention: Some(Attention::Sol), ..Tuning::default() };
+        }
+        g.asked = Some(Asked { attention: Some("sol".into()), attention_precision: Some("fp16".into()), ..Asked::default() });
+        g.revision += 1;
+    }
 }
 
 /// A 14-inch laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which

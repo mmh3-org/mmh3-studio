@@ -6,7 +6,7 @@ bin=${CARGO_TARGET_DIR:-../../target}/release
 app=$bin/mmh3-studio
 root=$bin/screenshot-dirs
 mkdir -p screenshots
-for scene in empty disconnected running previewing cancelled gallery failed custom-size offline-selected confirm-delete timing references power effort effort-small effort-custom; do
+for scene in empty disconnected running previewing cancelled gallery failed custom-size offline-selected confirm-delete timing references power effort effort-small effort-custom effort-details; do
   for theme in light dark; do
     $app --snap "screenshots/scene-$scene-$theme.png" --scene "$scene" --size 1320x860 --scale 2 --theme "$theme" --at 1.0 >/dev/null
   done

@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
-use crate::api::Timings;
+use crate::api::{Attention, Timings};
+use crate::effort::{SOL_START, SOL_TAU, start_step};
 use crate::estimate::Run;
 use crate::sizes::megapixels;
 use rune::{Color, Cx, El, SurfaceFit, col, el, icon, row, text};
@@ -449,6 +450,9 @@ fn info(s: &State, g: &Gen, k: &Kit, layer: &mut Vec<El>) -> El {
         1 => facts.push("edits 1 picture".into()),
         n => facts.push(format!("edits {n} pictures")),
     }
+    if let Some(e) = g.effort() {
+        facts.push(format!("{} effort", e.label()));
+    }
     let mut out = row().key("facts").gap(4.0).center_y().shrink().min_w(0.0);
     if !facts.is_empty() {
         out = out.child(text(facts.join(" · ")).key("facts-text").font(k.ty.small).color(c.text_muted).truncate().shrink().min_w(0.0));
@@ -543,7 +547,59 @@ fn timing(s: &State, g: &Gen, total: f64, timings: Option<&Timings>, k: &Kit) ->
     if let Some(n) = note {
         out = out.child(text(n).key("timing-note").font(k.ty.small).color(c.text_faint).wrap());
     }
-    out
+    out.children(asked_for(g, k))
+}
+
+/// The effort a picture was asked at and what it traded: what the server reports where it
+/// does, and what the studio sent otherwise.
+fn asked_for(g: &Gen, k: &Kit) -> Option<El> {
+    let c = &k.c;
+    if g.request.is_none() && g.asked.is_none() {
+        return None;
+    }
+    let t = g.tuning();
+    let said = g.asked.as_ref();
+    let mut lines: Vec<(&str, String)> = Vec::new();
+    let level = g.request.as_ref().and_then(|r| r.effort);
+    lines.push(("Effort", level.map_or_else(|| "Not recorded".to_owned(), |e| e.label().to_owned())));
+    lines.push(("Attention", if t.attention == Some(Attention::Sol) { "Sol-Attn".to_owned() } else { "Dense".to_owned() }));
+    if t.attention == Some(Attention::Sol) {
+        lines.push(("Sol-Attn from", format!("step {}", start_step(t.sparse_start.unwrap_or(SOL_START)))));
+        lines.push(("Sol-Attn threshold", t.sparse_tau.unwrap_or(SOL_TAU).to_string()));
+    }
+    lines.push(("Draft steps", t.draft_steps.unwrap_or(0).to_string()));
+    let precision = match (said.and_then(|a| a.attention_precision.clone()), t.attention_precision) {
+        (Some(p), _) => p,
+        (None, Some(p)) => p.field().to_owned(),
+        (None, None) => "server default".to_owned(),
+    };
+    lines.push(("Attention precision", precision));
+    let mut rows = col().key("asked-rows").w_full().gap(6.0);
+    for (name, value) in lines {
+        rows = rows.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(text(name).font(k.ty.small).color(c.text_muted).grow(1.0).shrink().min_w(0.0).truncate())
+                .child(text(value).font(k.ty.small).color(c.text_base)),
+        );
+    }
+    let source = match said {
+        Some(a) if a.attention.is_some() => "The server reports the attention and its precision; the rest is what the studio sent.",
+        _ => "As the studio sent them; this server doesn't report them.",
+    };
+    Some(
+        col()
+            .key("asked-for")
+            .w_full()
+            .gap(8.0)
+            .pt(10.0)
+            .border_sides([1.0, 0.0, 0.0, 0.0], c.border_muted)
+            .child(text("Asked for").font(k.ty.small_medium).color(c.text_faint))
+            .child(rows)
+            .child(text(source).key("asked-note").font(k.ty.small).color(c.text_faint).wrap()),
+    )
 }
 
 /// The row under the title: what can be done with the picture, its zoom, and what it is.

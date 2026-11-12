@@ -246,6 +246,16 @@ impl Gen {
         })
     }
 
+    /// The effort it was asked at, when that traded anything: the level the studio remembers,
+    /// or Custom for options the server reports without one.
+    pub fn effort(&self) -> Option<Effort> {
+        match self.request.as_ref().and_then(|r| r.effort) {
+            Some(Effort::High) => None,
+            Some(e) => Some(e),
+            None => (!self.tuning().is_empty()).then_some(Effort::Custom),
+        }
+    }
+
     /// How its steps run, once its size is known.
     pub fn run(&self) -> Option<Run> {
         let min_area = self.asked.as_ref().and_then(|a| a.min_generation_area).or(self.request.as_ref().and_then(|r| r.min_generation_area));

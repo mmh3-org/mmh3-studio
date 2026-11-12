@@ -85,9 +85,10 @@ fn status_line(g: &Gen, clock: f64, k: &Kit) -> (String, Color) {
         Phase::Queued => ("Queued".into(), c.text_faint),
         Phase::Running { since, .. } if g.stopping => (format!("Stopping after this step · {}", elapsed(*since, clock)), c.text_muted),
         Phase::Running { step, steps, since } => (format!("{} · {}", stage(g, *step, *steps).0, elapsed(*since, clock)), c.text_muted),
-        Phase::Done { seconds, .. } => match g.size() {
-            Some((w, h)) => (format!("{w}×{h} · {seconds:.1} s"), c.text_faint),
-            None => (format!("{seconds:.1} s"), c.text_faint),
+        Phase::Done { seconds, .. } => match (g.size(), g.effort()) {
+            (Some((w, h)), Some(e)) => (format!("{w}×{h} · {} · {seconds:.1} s", e.label()), c.text_faint),
+            (Some((w, h)), None) => (format!("{w}×{h} · {seconds:.1} s"), c.text_faint),
+            (None, _) => (format!("{seconds:.1} s"), c.text_faint),
         },
         Phase::Failed(_) => ("Failed".into(), c.danger.fg),
         Phase::Cancelled { .. } => ("Cancelled".into(), c.text_faint),

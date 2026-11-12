@@ -583,3 +583,14 @@ fn custom_shows_only_what_applies_and_holds_generate_back_on_a_bad_threshold() {
     let sent = rt.state.request().unwrap().tuning;
     assert_eq!((sent.attention, sent.sparse_tau, sent.draft_steps), (None, None, Some(2)), "what does not apply is not sent");
 }
+
+#[test]
+fn a_picture_s_row_and_details_say_what_effort_it_was_asked_at() {
+    let rt = runtime(scenes::effort_details, false);
+    assert!(text_of(&rt, "facts-text").ends_with("Medium effort"), "{}", text_of(&rt, "facts-text"));
+    assert!(rt.find("asked-for").is_some());
+    assert!(text_of(&rt, "asked-note").starts_with("The server reports the attention"), "{}", text_of(&rt, "asked-note"));
+    let statuses: Vec<String> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("row-status")).filter_map(|e| e.text).collect();
+    assert!(statuses.iter().any(|t| t == "5472×3072 · Medium · 241.8 s"), "{statuses:?}");
+    assert!(statuses.iter().any(|t| t == "2048×2048 · 38.7 s"), "High says nothing: {statuses:?}");
+}
