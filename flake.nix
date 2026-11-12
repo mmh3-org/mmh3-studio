@@ -9,11 +9,11 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # The engine the studio talks to. Upstream generates pictures on CUDA
-    # only; metal-image is the fork's work-in-progress port to Metal, kept on
-    # top of upstream master and its /v1/images API.
+    # The engine the studio talks to: the fork's studio branch, which adds
+    # previews, cancel, one events stream and job metadata to the Metal port
+    # of upstream's /v1/images API.
     mmh3 = {
-      url = "github:ryoppippi/mmh3/metal-image";
+      url = "github:ryoppippi/mmh3/studio";
       flake = false;
     };
     rust-overlay = {

@@ -73,16 +73,16 @@
     "mmh3": {
       "flake": false,
       "locked": {
-        "lastModified": 1794429687,
-        "narHash": "sha256-WraEanufYxJdsdPTZ/MQYl8K/bR2QoUTv4fQkqoYvAQ=",
+        "lastModified": 1794444186,
+        "narHash": "sha256-D2s94mb8OfJATn4zsg8TB68sNSpNdRvH/LX1mCUuyIE=",
         "owner": "ryoppippi",
         "repo": "mmh3",
-        "rev": "7a53f4859aab981f6714cb195498129944a7f030",
+        "rev": "d0409645c755f7857b7ad20e583a96ba774b200a",
         "type": "github"
       },
       "original": {
         "owner": "ryoppippi",
-        "ref": "metal-image",
+        "ref": "studio",
         "repo": "mmh3",
         "type": "github"
       }
