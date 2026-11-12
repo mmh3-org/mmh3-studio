@@ -48,6 +48,15 @@ fn the_tuning_is_what_the_server_says_where_it_says_and_a_rerun_keeps_it() {
 }
 
 #[test]
+fn a_level_that_traded_nothing_at_its_size_says_no_effort() {
+    use crate::effort::Effort;
+    let medium = ImageRequest { effort: Some(Effort::Medium), ..asked("a fox") };
+    assert_eq!(Gen::new("a".into(), Some(medium), Phase::Queued).effort(), None, "Medium at 2048 × 2048 sent what High does");
+    let sol = ImageRequest { effort: Some(Effort::Medium), tuning: Tuning { attention: Some(Attention::Sol), ..Tuning::default() }, ..asked("a fox") };
+    assert_eq!(Gen::new("b".into(), Some(sol), Phase::Queued).effort(), Some(Effort::Medium));
+}
+
+#[test]
 fn running_keeps_the_time_it_started_and_done_asks_for_the_picture() {
     let mut phase = Phase::Queued;
     assert!(step(&mut phase, &server("a", api::State::Running), 1.0).is_empty());

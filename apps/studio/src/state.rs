@@ -249,10 +249,13 @@ impl Gen {
     /// The effort it was asked at, when that traded anything: the level the studio remembers,
     /// or Custom for options the server reports without one.
     pub fn effort(&self) -> Option<Effort> {
+        if self.tuning().is_empty() {
+            return None;
+        }
         match self.request.as_ref().and_then(|r| r.effort) {
             Some(Effort::High) => None,
             Some(e) => Some(e),
-            None => (!self.tuning().is_empty()).then_some(Effort::Custom),
+            None => Some(Effort::Custom),
         }
     }
 
