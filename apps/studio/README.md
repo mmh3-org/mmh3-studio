@@ -1,6 +1,6 @@
 # mmh3 studio
 
-A native macOS and web client for a resident `mmh3 server` running MiniMax-H3-Image. The server keeps the text encoder, DiT and VAE loaded, so a generation never pays a cold start. The studio never loads a model itself. It is built with [Rune](https://github.com/anomalyco/rune), pinned to a revision in the workspace's `Cargo.toml`.
+A native macOS and web client for a resident `mmh3 server` running MiniMax-H3-Image. The server keeps the text encoder, DiT and VAE loaded, so no generation after the first pays a cold start. The studio never loads a model itself. It is built with [Rune](https://github.com/anomalyco/rune), pinned to a revision in the workspace's `Cargo.toml`.
 
 The studio is a member of the repository's Cargo workspace. The root flake's dev shell supplies Rust 1.99.1 and `just`; with direnv it loads on entering the repository.
 
@@ -12,7 +12,7 @@ Start the server with the models the [repository's README](../../README.md#model
 MMH3_MODELS=/path/to/models just server
 ```
 
-Then start the studio, or run it without a checkout through `nix run github:ryoppippi/mmh3-studio`:
+Then start the studio:
 
 ```sh
 just studio::run
