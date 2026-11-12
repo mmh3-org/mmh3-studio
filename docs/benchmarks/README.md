@@ -20,7 +20,7 @@ Each stage adds commits from the `studio` branch of
 
 | Stage | Commit | What it adds |
 | --- | --- | --- |
-| Upstream Metal PR | `aadc5bb` | The baseline. |
+| Upstream Metal PR | `aadc5bb` | The baseline: [niw/mmh3#1](https://github.com/niw/mmh3/pull/1) at the commit the `studio` branch forks from. |
 | + pipeline | `4eecdcb` | Encodes the prompt once, reads the VAE ahead, keeps the prompt, and gives the VAE its own slot. |
 | + loader | `58f3d7a` | Threaded weight reads, and leaves the embedding table on disk. |
 | + VAE | `fcef171` | Batched tiles and FP16 VAE products. |
@@ -41,8 +41,9 @@ The PR's first 4096² run went first in the block, at 1.15 GHz, and took 146.6 s
 at about 1.0 GHz like every other 4096² run, took 167.1 s. The 4096² ratios above therefore measure
 heat, not code; the next chart separates the two.
 
-Resident server: `mmh3 server` built from studio `9f23086`. Its engine is the same as `c7aa76e`, and
-it is the first build whose API reports timings. Three pictures in a row, in seconds:
+Resident server: `mmh3 server` built from studio `9f23086`, which is `c7aa76e` plus the
+cancellation, preview, timing and server commits; it is the first build whose API reports timings,
+and its pictures are bit-identical to `c7aa76e`'s. Three pictures in a row, in seconds:
 
 | Size | Picture 1 | Picture 2 | Picture 3 |
 | --- | --- | --- | --- |
@@ -51,8 +52,7 @@ it is the first build whose API reports timings. Three pictures in a row, in sec
 
 The server saves the 2–4 s of load and encode on every picture after the first. Its wall times are
 no faster than the CLI's because heat decided them. The 2048² server ran straight after the 4096²
-block, at about 1.0 GHz. The first 4096² picture came after 12 minutes of idle. Its pictures are
-bit-identical to the CLI's.
+block, at about 1.0 GHz. The first 4096² picture came after about 11 minutes of idle.
 
 ## Where the time goes
 
@@ -60,7 +60,7 @@ bit-identical to the CLI's.
 
 Median seconds per phase, cold CLI, High effort. "Prompt" is the text encoder's load and encode,
 which the log reports as one figure. "Other" is the rest of the wall time: process start-up and
-writing the PNG.
+writing the PNG. Each column is its own median, so a row need not add up to its wall time.
 
 | Size | Engine | Prompt | DiT load | Steps | Decode | Other | Outside steps | Wall |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ writing the PNG.
 
 - The loader commits cut loading from 5.0 s to 2.1 s. One final 4096² run took 3.9 s, hence the
   median of 3.0 s.
-- The VAE commits cut decode from 4.1 s to 1.0 s at 2048² and from 16.8 s to 4.8 s at 4096².
+- The VAE commits cut decode from 4.1 s to 1.0 s at 2048² and from 16.8 s to 4.9 s at 4096².
 - The step totals differ only with the GPU clock. At 4096² the PR's steps ran at 1.00–1.15 GHz,
   the final engine's at 0.93–0.97 GHz.
 
@@ -117,12 +117,13 @@ Only the M5 Max rows were measured here. The rest are cited and were not re-meas
 | What | 4096² | Source |
 | --- | --- | --- |
 | M5 Max, final engine, High / Medium / Low | 160 s / 109 s / 67 s | this run |
-| DGX Spark, default (INT8/FP8 attention, INT8 linears) | 54 s | upstream [`docs/image.md`](https://github.com/niw/mmh3/blob/main/docs/image.md), cited |
-| DGX Spark, faster settings (2 draft steps, Sol-Attn) | 35 s | upstream [`docs/image.md`](https://github.com/niw/mmh3/blob/main/docs/image.md), cited |
+| DGX Spark, 6 steps (INT8/FP8 attention, INT8 linears) | 54 s | upstream [`docs/image.md`](https://github.com/niw/mmh3/blob/master/docs/image.md), cited |
+| DGX Spark, 2 draft steps with Sol-Attn (INT8/FP8 attention, INT8 linears) | 35 s | upstream [`docs/image.md`](https://github.com/niw/mmh3/blob/master/docs/image.md), cited |
 | h3-image-mlx on this Mac | 1.42–1.46× slower than mmh3 | an earlier comparison on this Mac, cited; no timing log was kept |
 
 The Mac runs FP16 attention on Metal with its GPU held at about 0.9–1.0 GHz by the thermal limit,
-so the gap to the DGX Spark is not a like-for-like comparison of the code.
+so the gap to the DGX Spark is not a like-for-like comparison of the code. Upstream's `docs/image.md`
+lists further DGX Spark settings down to 24 s, and its own 14-inch M5 Max figures.
 
 ## Conditions
 
@@ -134,13 +135,15 @@ so the gap to the DGX Spark is not a like-for-like comparison of the code.
   with the GPU more than 50 % busy:
   - 2048² CLI: 1.10–1.23 GHz at 29–37 W.
   - 4096² CLI: 1.15 GHz at 36 W for the first run. Every later run was held at 0.89–1.02 GHz and
-    22–27 W, close to this chassis's known limit of about 0.9 GHz and 20 W.
+    22–28 W by the power and cooling of the 14-inch case, whatever the adapter; upstream's
+    `docs/image.md` describes the same limit on this machine.
   - 2048² server: 0.99–1.03 GHz at 23–26 W.
   - 4096² server: not recorded. The macmon binary was garbage-collected from the Nix store partway
     through.
-- **Background load:** `mediaanalysisd` (a macOS system process that analyses Photos) used about
-  200 % CPU around 09:58–10:10 and probably during the 4096² server runs. It was left running.
-  macmon took about 20 % of one core.
+- **Background load:** `mediaanalysisd` (a macOS system process that analyses Photos) was at about
+  200 % CPU in the two snapshots taken at 10:10, just before the 4096² server block, and absent
+  from those at 09:58 and 10:18, so it probably ran during some of the 4096² server pictures. It
+  was left running. macmon took about 20 % of one core.
 
 ## Method
 
