@@ -1,9 +1,11 @@
 //! A stand-in for `mmh3 server`, so the studio can be exercised without the engine. It answers
-//! the routes of mmh3's `src/server.rs` with the same JSON, status codes and event stream. A
-//! picture takes six timed steps and is a painted PNG of the requested size; its fields are
-//! checked as `mmh3 image` checks them, so a bad value fails the generation rather than the
-//! request. A video is there only so that a client meets one: it takes its steps and writes
-//! nothing worth watching.
+//! the routes of the studio's fork of mmh3's `src/server.rs` with the same JSON, status codes and
+//! event streams: what each generation asked for, its stage timings, a preview after each step,
+//! cancelling and `GET /v1/events`. Started [`Config::upstream`], it answers only the routes and
+//! fields of upstream mmh3, as a server without the fork does. A picture takes six timed steps
+//! and is a painted PNG of the requested size; its fields are checked as `mmh3 image` checks
+//! them, so a bad value fails the generation rather than the request. A video is there only so
+//! that a client meets one: it takes its steps and writes nothing worth watching.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,7 +13,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::api::{Generation, Generations, IMAGE_STEPS, MAX_REFERENCES, Memory, Refusal, State, Status};
+use crate::api::{Asked, Generation, IMAGE_STEPS, Kind, MAX_REFERENCES, Memory, Refusal, State, Status, Timings};
 
 /// The slots of the server's shared model table, in the order `/v1/status` lists them. A
 /// picture keeps its decoder in the video VAE's slot.
@@ -22,11 +24,20 @@ const IMAGE_OPTIONS: [&str; 8] = ["prompt", "prompt-file", "reference", "width",
 const IMAGE_FILE_OPTIONS: [&str; 2] = ["prompt-file", "reference"];
 const MACHINE_OPTIONS: [&str; 10] = ["models", "dit", "text-encoder", "video-vae", "audio-vae", "devices", "vram-budget", "worker", "worker-units", "token"];
 const VIDEO_FILE_OPTIONS: [&str; 7] = ["prompt-file", "context", "first-frame", "last-frame", "reference", "reference-audio", "reference-video"];
+/// The fields the fork adds to a generation, which an upstream server never writes.
+const FORK_FIELDS: [&str; 7] = ["kind", "request", "created_at", "started_at", "finished_at", "timings", "preview_step"];
 const TOTAL_MEMORY: u64 = 128 << 30;
 const MAX_BODY: usize = 1 << 30;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// How many announcements of `GET /v1/events` are kept for clients that read slowly; one further
+/// behind is sent a new snapshot, as the fork's broadcast channel does.
+const ANNOUNCED: usize = 256;
 const CANVAS_MULTIPLE: usize = 32;
 const DEFAULT_SIDE: usize = 2048;
+/// A preview is mapped from the latent at an eighth of the canvas.
+const PREVIEW_SCALE: usize = 8;
+/// What the mock says its `DiT`'s attention runs at once a picture starts.
+const ATTENTION_PRECISION: &str = "fp16";
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -34,11 +45,14 @@ pub struct Config {
     pub text: Duration,
     pub step: Duration,
     pub decode: Duration,
+    /// Answer as upstream mmh3 does: no event stream for every generation, no previews, no
+    /// cancelling, and none of the fork's fields.
+    pub upstream: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { text: Duration::from_millis(400), step: Duration::from_millis(600), decode: Duration::from_millis(700) }
+        Config { text: Duration::from_millis(400), step: Duration::from_millis(600), decode: Duration::from_millis(700), upstream: false }
     }
 }
 
@@ -46,6 +60,15 @@ impl Default for Config {
 enum Output {
     Video,
     Picture,
+}
+
+impl Output {
+    fn kind(self) -> Kind {
+        match self {
+            Output::Video => Kind::Video,
+            Output::Picture => Kind::Image,
+        }
+    }
 }
 
 /// One field of a request's form.
@@ -62,19 +85,43 @@ impl Field {
     }
 }
 
+/// Why a run ended without writing anything.
+enum Stop {
+    Failed(String),
+    Cancelled,
+}
+
+impl From<String> for Stop {
+    fn from(why: String) -> Stop {
+        Stop::Failed(why)
+    }
+}
+
 struct Job {
     id: String,
     output: Output,
     state: State,
     queued: SystemTime,
+    started_at: Option<SystemTime>,
+    finished_at: Option<SystemTime>,
     seconds: Option<f64>,
     step: Option<u32>,
     steps: Option<u32>,
     failure: Option<String>,
     fields: Vec<Field>,
+    request: Asked,
+    timings: Option<Timings>,
+    /// Each step's preview, the first step's first.
+    previews: Vec<Arc<Vec<u8>>>,
+    /// Asked to stop at the next step.
+    cancel: bool,
     written: Option<Arc<Vec<u8>>>,
     /// Every description the job has had, so a stream says each change however slowly it reads.
     said: Vec<Generation>,
+}
+
+fn unix(t: SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
 impl Job {
@@ -88,10 +135,38 @@ impl Job {
             state: self.state,
             step: if running { self.step } else { None },
             steps: if running { self.steps } else { None },
-            timings: None,
+            kind: Some(self.output.kind()),
+            request: Some(self.request.clone()),
+            created_at: Some(unix(self.queued)),
+            started_at: self.started_at.map(unix),
+            finished_at: self.finished_at.map(unix),
+            timings: self.timings.clone(),
+            preview_step: (!self.previews.is_empty()).then_some(self.previews.len() as u32),
         }
     }
 }
+
+/// What the request asked for, as the fork's server says it: a picture's defaults where the
+/// request left an option out, and none where a video's are its own.
+fn asked(fields: &[Field], output: Output) -> Asked {
+    let given = |name: &str| fields.iter().rev().find(|f| f.name == name).map(Field::text);
+    let picture = output == Output::Picture;
+    let number = |name: &str, default: Option<u64>| given(name).map_or(default, |v| v.parse().ok());
+    let side = picture.then_some(DEFAULT_SIDE as u64);
+    Asked {
+        prompt: given("prompt").or_else(|| given("prompt-file")),
+        width: number("width", side).and_then(|v| u32::try_from(v).ok()),
+        height: number("height", side).and_then(|v| u32::try_from(v).ok()),
+        seed: number("seed", Some(0)),
+        min_generation_area: number("min-generation-area", picture.then_some((DEFAULT_SIDE * DEFAULT_SIDE) as u64)),
+        attention_precision: given("attention-precision"),
+        attention: given("attention").or_else(|| picture.then(|| "dense".to_owned())),
+        references: fields.iter().filter(|f| f.name == "reference").filter_map(|f| f.filename.clone()).collect(),
+    }
+}
+
+/// An announcement of `GET /v1/events`: its event's name and data.
+type Announcement = (&'static str, String);
 
 #[derive(Default)]
 struct Jobs {
@@ -104,6 +179,26 @@ struct Jobs {
     /// The table is busy, so `/v1/status` says `null`: while a picture decodes, and throughout
     /// a video, which lends every model to its worker.
     lent: bool,
+    /// The latest announcements, the oldest first, and how many were ever made.
+    announced: VecDeque<Announcement>,
+    announcements: u64,
+}
+
+impl Jobs {
+    fn announce(&mut self, name: &'static str, data: String) {
+        self.announced.push_back((name, data));
+        self.announcements += 1;
+        if self.announced.len() > ANNOUNCED {
+            self.announced.pop_front();
+        }
+    }
+
+    /// Every generation, the most recent first.
+    fn generations(&self) -> Vec<Generation> {
+        let mut jobs: Vec<(SystemTime, Generation)> = self.list.iter().map(|j| (j.queued, j.describe())).collect();
+        jobs.sort_by(|(a, _), (b, _)| b.cmp(a));
+        jobs.into_iter().map(|(_, g)| g).collect()
+    }
 }
 
 struct Shared {
@@ -127,19 +222,65 @@ impl Shared {
         self.lock().table.remove(model);
     }
 
+    fn holds(&self, model: &str) -> bool {
+        self.lock().table.contains(model)
+    }
+
     fn lend(&self, lent: bool) {
         self.lock().lent = lent;
     }
 
+    fn cancelled(&self, id: &str) -> bool {
+        self.lock().list.iter().any(|j| j.id == id && j.cancel)
+    }
+
+    /// The generation as this server writes it: the fork's fields as they are, `null` included,
+    /// or none of them from an upstream server.
+    fn wire(&self, g: &Generation) -> serde_json::Value {
+        let mut value = serde_json::to_value(g).unwrap_or_default();
+        if let Some(fields) = value.as_object_mut() {
+            for name in FORK_FIELDS {
+                if self.config.upstream {
+                    fields.remove(name);
+                } else {
+                    fields.entry(name).or_insert(serde_json::Value::Null);
+                }
+            }
+        }
+        value
+    }
+
+    fn list(&self, generations: &[Generation]) -> String {
+        let generations: Vec<serde_json::Value> = generations.iter().map(|g| self.wire(g)).collect();
+        serde_json::json!({ "generations": generations }).to_string()
+    }
+
+    /// Changes job `id` and says so: to its own event stream, and to `GET /v1/events` with a
+    /// `generation` and, when it brought one, a `preview`.
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) {
-        if let Some(job) = self.lock().list.iter_mut().find(|j| j.id == id) {
+        let mut jobs = self.lock();
+        if let Some(job) = jobs.list.iter_mut().find(|j| j.id == id) {
+            let before = job.said.last().and_then(|g| g.preview_step);
             f(job);
             let now = job.describe();
             if job.said.last() != Some(&now) {
-                job.said.push(now);
+                job.said.push(now.clone());
+                let generation = self.wire(&now).to_string();
+                jobs.announce("generation", generation);
+                if let Some(step) = now.preview_step.filter(|s| before != Some(*s)) {
+                    let url = format!("/v1/generations/{id}/preview/{step}");
+                    let preview = serde_json::json!({ "id": id, "step": step, "steps": now.steps, "url": url });
+                    jobs.announce("preview", preview.to_string());
+                }
             }
         }
+        drop(jobs);
         self.changed.notify_all();
+    }
+
+    /// Changes the timings of job `id`, which it reports stage by stage.
+    fn time(&self, id: &str, f: impl FnOnce(&mut Timings)) {
+        self.update(id, |j| f(j.timings.get_or_insert_with(Timings::default)));
     }
 }
 
@@ -173,11 +314,17 @@ fn work(shared: &Shared) {
                 }
                 jobs = shared.queued.wait(jobs).unwrap_or_else(std::sync::PoisonError::into_inner);
             };
-            let Some(job) = jobs.list.iter().find(|j| j.id == id) else { continue };
+            let Some(job) = jobs.list.iter().find(|j| j.id == id && j.state == State::Queued) else { continue };
             (id, job.output, job.fields.clone())
         };
         let started = Instant::now();
-        shared.update(&id, |j| j.state = State::Running);
+        shared.update(&id, |j| {
+            j.state = State::Running;
+            j.started_at = Some(SystemTime::now());
+            if output == Output::Picture && j.request.attention_precision.is_none() {
+                j.request.attention_precision = Some(ATTENTION_PRECISION.to_owned());
+            }
+        });
         let ended = match output {
             Output::Picture => picture(shared, &id, &fields),
             Output::Video => video(shared, &id, &fields),
@@ -185,28 +332,43 @@ fn work(shared: &Shared) {
         shared.lend(false);
         shared.update(&id, |j| {
             j.seconds = Some(started.elapsed().as_secs_f64());
+            j.finished_at = Some(SystemTime::now());
             match ended {
                 Ok(written) => {
                     j.state = State::Done;
                     j.written = Some(Arc::new(written));
                 }
-                Err(why) => {
+                Err(Stop::Failed(why)) => {
                     j.state = State::Failed;
                     j.failure = Some(why);
                 }
+                Err(Stop::Cancelled) => j.state = State::Cancelled,
             }
         });
     }
 }
 
-fn steps(shared: &Shared, id: &str, steps: u32) {
+/// Takes `steps` timed steps, each of a picture previewed with `preview`, and stops at a step's
+/// boundary when the job is cancelled.
+fn steps(shared: &Shared, id: &str, steps: u32, preview: Option<&dyn Fn(u32) -> Vec<u8>>) -> Result<(), Stop> {
     for k in 1..=steps {
+        if shared.cancelled(id) {
+            return Err(Stop::Cancelled);
+        }
+        let t = Instant::now();
         std::thread::sleep(shared.config.step);
+        let png = preview.map(|p| Arc::new(p(k)));
+        let seconds = t.elapsed().as_secs_f64();
         shared.update(id, |j| {
             j.step = Some(k);
             j.steps = Some(steps);
+            if let Some(png) = png {
+                j.timings.get_or_insert_with(Timings::default).steps.push(seconds);
+                j.previews.push(png);
+            }
         });
     }
+    Ok(())
 }
 
 /// `option_number` of mmh3's command line.
@@ -217,22 +379,31 @@ fn number(fields: &[Field], name: &str, default: usize) -> Result<usize, String>
     }
 }
 
+/// Times `f` as stage `stage` of job `id`'s timings.
+fn timed<T>(shared: &Shared, id: &str, stage: impl FnOnce(&mut Timings) -> &mut Option<f64>, f: impl FnOnce() -> T) -> T {
+    let t = Instant::now();
+    let out = f();
+    let seconds = t.elapsed().as_secs_f64();
+    shared.time(id, |timings| *stage(timings) = Some(seconds));
+    out
+}
+
 /// What `mmh3 image` would make of the fields, in the order it checks them.
-fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
+fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Stop> {
     let width = number(fields, "width", DEFAULT_SIDE)?;
     let height = number(fields, "height", DEFAULT_SIDE)?;
     let min_area = number(fields, "min-generation-area", DEFAULT_SIDE * DEFAULT_SIDE)?;
     let seed = number(fields, "seed", 0)? as u64;
     if width < CANVAS_MULTIPLE || height < CANVAS_MULTIPLE {
-        return Err(format!("--width and --height must be at least {CANVAS_MULTIPLE}"));
+        return Err(format!("--width and --height must be at least {CANVAS_MULTIPLE}").into());
     }
     if !(1024..=16_777_216).contains(&min_area) {
-        return Err("--min-generation-area must be from 1024 to 16777216".into());
+        return Err("--min-generation-area must be from 1024 to 16777216".to_owned().into());
     }
     let has = |name: &str| fields.iter().any(|f| f.name == name);
     let prompt = match (has("prompt"), has("prompt-file")) {
-        (true, true) => return Err("pass either --prompt or --prompt-file".into()),
-        (false, false) => return Err("pass a prompt or --context, not both".into()),
+        (true, true) => return Err("pass either --prompt or --prompt-file".to_owned().into()),
+        (false, false) => return Err("pass a prompt or --context, not both".to_owned().into()),
         _ => fields.iter().rev().find(|f| f.name == "prompt" || f.name == "prompt-file").map(Field::text).unwrap_or_default(),
     };
     let references: Vec<&Field> = fields.iter().filter(|f| f.name == "reference").collect();
@@ -240,40 +411,84 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Strin
         let name = r.filename.as_deref().unwrap_or_default();
         let picture = image::load_from_memory(&r.bytes).map_err(|e| format!("{name}: {e}"))?;
         if picture.width().min(picture.height()) < CANVAS_MULTIPLE as u32 {
-            return Err(format!("{name}: a reference needs at least {CANVAS_MULTIPLE} pixels on each side, not {}×{}", picture.width(), picture.height()));
+            return Err(
+                format!("{name}: a reference needs at least {CANVAS_MULTIPLE} pixels on each side, not {}×{}", picture.width(), picture.height()).into()
+            );
         }
     }
     if references.len() > MAX_REFERENCES {
-        return Err(format!("pass at most {MAX_REFERENCES} --reference pictures"));
+        return Err(format!("pass at most {MAX_REFERENCES} --reference pictures").into());
     }
-    std::thread::sleep(shared.config.text);
-    shared.keep(&["text_encoder"]);
+    if shared.cancelled(id) {
+        return Err(Stop::Cancelled);
+    }
+    if !shared.holds("text_encoder") {
+        timed(shared, id, |t| &mut t.load_text, || shared.keep(&["text_encoder"]));
+    }
+    timed(shared, id, |t| &mut t.encode, || std::thread::sleep(shared.config.text));
+    if shared.cancelled(id) {
+        return Err(Stop::Cancelled);
+    }
+    if !shared.holds("dit") {
+        timed(shared, id, |t| &mut t.load_dit, || {});
+    }
     shared.take("dit");
-    steps(shared, id, IMAGE_STEPS);
+    let (w, h) = ((width / PREVIEW_SCALE).max(1) as u32, (height / PREVIEW_SCALE).max(1) as u32);
+    let preview = |k: u32| preview(w, h, seed, k, IMAGE_STEPS);
+    let stepped = steps(shared, id, IMAGE_STEPS, Some(&preview));
     shared.keep(&["dit"]);
+    stepped?;
     if prompt.contains("[fail]") {
-        return Err("The mock server was asked to fail.".into());
+        return Err("The mock server was asked to fail.".to_owned().into());
+    }
+    if shared.cancelled(id) {
+        return Err(Stop::Cancelled);
     }
     shared.lend(true);
     shared.keep(&["video_vae"]);
-    let t = Instant::now();
-    let png = paint(width as u32, height as u32, seed);
-    std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
+    shared.time(id, |t| t.decode_read = Some(0.0));
+    let png = timed(
+        shared,
+        id,
+        |t| &mut t.decode,
+        || {
+            let t = Instant::now();
+            let png = paint(width as u32, height as u32, seed);
+            std::thread::sleep(shared.config.decode.saturating_sub(t.elapsed()));
+            png
+        },
+    );
+    shared.time(id, |t| t.write = Some(0.0));
     Ok(png)
 }
 
-fn video(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, String> {
+fn video(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Stop> {
     let n = number(fields, "steps", 8)? as u32;
     shared.lend(true);
     shared.keep(&VIDEO_MODELS);
     std::thread::sleep(shared.config.text);
-    steps(shared, id, n);
+    steps(shared, id, n, None)?;
     std::thread::sleep(shared.config.decode);
     Ok(b"not really an mp4".to_vec())
 }
 
+/// What step `k` of `steps` predicts: the picture to come, washed towards grey the earlier the
+/// step, as a real preview sharpens towards the decode.
+pub fn preview(width: u32, height: u32, seed: u64, k: u32, steps: u32) -> Vec<u8> {
+    let mut rgb = paint_rgb(width, height, seed);
+    let t = k as f32 / steps.max(1) as f32;
+    for v in &mut rgb {
+        *v = (f32::from(*v) * t + 128.0 * (1.0 - t)) as u8;
+    }
+    png(&rgb, width, height)
+}
+
 /// A seed-coloured diagonal gradient with rings, so each generation looks different.
 pub fn paint(width: u32, height: u32, seed: u64) -> Vec<u8> {
+    png(&paint_rgb(width, height, seed), width, height)
+}
+
+fn paint_rgb(width: u32, height: u32, seed: u64) -> Vec<u8> {
     let hue = |n: u64| (n % 360) as f32;
     let (h1, h2) = (hue(seed.wrapping_mul(2_654_435_761)), hue(seed.wrapping_mul(40_503).wrapping_add(137)));
     let (a, b) = (hsv(h1, 0.55, 0.95), hsv(h2, 0.75, 0.35));
@@ -294,9 +509,13 @@ pub fn paint(width: u32, height: u32, seed: u64) -> Vec<u8> {
             }
         }
     }
+    rgb
+}
+
+fn png(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut png = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new_with_quality(&mut png, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Sub);
-    image::ImageEncoder::write_image(encoder, &rgb, width, height, image::ExtendedColorType::Rgb8).map(|()| png).unwrap_or_default()
+    image::ImageEncoder::write_image(encoder, rgb, width, height, image::ExtendedColorType::Rgb8).map(|()| png).unwrap_or_default()
 }
 
 fn hsv(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -365,6 +584,13 @@ fn respond(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: 
     stream.flush()
 }
 
+fn generation(stream: &mut TcpStream, shared: &Shared, status: u16, g: &Generation, headers: &[(&str, &str)]) -> std::io::Result<()> {
+    let body = shared.wire(g).to_string();
+    let mut headers = headers.to_vec();
+    headers.insert(0, ("content-type", "application/json"));
+    respond(stream, status, &headers, body.as_bytes())
+}
+
 fn json(stream: &mut TcpStream, status: u16, value: &impl serde::Serialize) -> std::io::Result<()> {
     respond(stream, status, &[("content-type", "application/json")], &serde_json::to_vec(value).unwrap_or_default())
 }
@@ -380,19 +606,29 @@ fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
     let mut stream = stream;
     let segments: Vec<&str> = request.path.trim_matches('/').split('/').collect();
     let method = request.method.as_str();
+    let fork = !shared.config.upstream;
     match (method, segments.as_slice()) {
         ("GET", ["v1", "status"]) => json(&mut stream, 200, &status(shared)),
         ("GET", ["v1", "generations"]) => {
-            let mut jobs: Vec<(SystemTime, Generation)> = shared.lock().list.iter().map(|j| (j.queued, j.describe())).collect();
-            jobs.sort_by(|(a, _), (b, _)| b.cmp(a));
-            json(&mut stream, 200, &Generations { generations: jobs.into_iter().map(|(_, g)| g).collect() })
+            let list = shared.list(&shared.lock().generations());
+            respond(&mut stream, 200, &[("content-type", "application/json")], list.as_bytes())
         }
         ("POST", ["v1", "generations"]) => create(&mut stream, shared, &request, Output::Video),
         ("POST", ["v1", "images"]) => create(&mut stream, shared, &request, Output::Picture),
         ("GET", ["v1", "generations", id]) => match find(shared, id) {
-            Some(g) => json(&mut stream, 200, &g),
+            Some(g) => generation(&mut stream, shared, 200, &g, &[]),
             None => refuse(&mut stream, 404, "no such generation"),
         },
+        ("GET", ["v1", "events"]) if fork => all_events(stream, shared),
+        ("POST", ["v1", "generations", id, "cancel"]) if fork => cancel(&mut stream, shared, id),
+        ("GET", ["v1", "generations", id, "preview"]) if fork => preview_png(&mut stream, shared, id, None),
+        ("GET", ["v1", "generations", id, "preview", step]) if fork => match step.parse() {
+            Ok(step) => preview_png(&mut stream, shared, id, Some(step)),
+            Err(_) => respond(&mut stream, 400, &[], b""),
+        },
+        // Upstream mmh3 has none of the fork's routes, which its router answers as any path it
+        // doesn't know.
+        (_, ["v1", "events"] | ["v1", "generations", _, "cancel" | "preview", ..]) if !fork => respond(&mut stream, 404, &[], b""),
         ("DELETE", ["v1", "generations", id]) => {
             let mut jobs = shared.lock();
             match jobs.list.iter().position(|j| j.id == *id) {
@@ -430,7 +666,44 @@ fn written(stream: &mut TcpStream, shared: &Shared, id: &str, wanted: Output) ->
             respond(stream, 200, &[("content-type", kind)], &bytes)
         }
         Some((_, State::Failed, _)) => refuse(stream, 409, "that generation failed"),
+        Some((_, State::Cancelled, _)) => refuse(stream, 409, "that generation was cancelled"),
         Some(_) => refuse(stream, 409, "that generation has not written anything yet"),
+    }
+}
+
+/// Stops job `id`: one waiting is dropped at once, one running stops at its next step.
+fn cancel(stream: &mut TcpStream, shared: &Shared, id: &str) -> std::io::Result<()> {
+    let state = shared.lock().list.iter().find(|j| j.id == id).map(|j| j.state);
+    match state {
+        None => return refuse(stream, 404, "no such generation"),
+        Some(State::Done | State::Failed) => return refuse(stream, 409, "that generation has ended"),
+        Some(State::Queued) => {
+            shared.lock().waiting.retain(|w| w != id);
+            shared.update(id, |j| {
+                j.state = State::Cancelled;
+                j.finished_at = Some(SystemTime::now());
+            });
+        }
+        Some(State::Running) => shared.update(id, |j| j.cancel = true),
+        Some(State::Cancelled) => {}
+    }
+    match find(shared, id) {
+        Some(g) => generation(stream, shared, 202, &g, &[]),
+        None => refuse(stream, 404, "no such generation"),
+    }
+}
+
+/// The preview of step `step`, counted from 1, or the latest.
+fn preview_png(stream: &mut TcpStream, shared: &Shared, id: &str, step: Option<usize>) -> std::io::Result<()> {
+    let found = shared.lock().list.iter().find(|j| j.id == id).map(|j| j.previews.clone());
+    let Some(previews) = found else { return refuse(stream, 404, "no such generation") };
+    let png = match step {
+        None => previews.last().ok_or("no preview yet".to_owned()),
+        Some(k) => k.checked_sub(1).and_then(|i| previews.get(i)).ok_or(format!("no preview of step {k}")),
+    };
+    match png {
+        Ok(png) => respond(stream, 200, &[("content-type", "image/png")], png),
+        Err(why) => refuse(stream, 404, &why),
     }
 }
 
@@ -481,11 +754,17 @@ fn create(stream: &mut TcpStream, shared: &Shared, request: &Request, output: Ou
         output,
         state: State::Queued,
         queued: SystemTime::now(),
+        started_at: None,
+        finished_at: None,
         seconds: None,
         step: None,
         steps: None,
         failure: None,
+        request: asked(&fields, output),
         fields,
+        timings: None,
+        previews: Vec::new(),
+        cancel: false,
         written: None,
         said: Vec::new(),
     };
@@ -493,11 +772,13 @@ fn create(stream: &mut TcpStream, shared: &Shared, request: &Request, output: Ou
     job.said.push(described.clone());
     jobs.list.push(job);
     jobs.waiting.push_back(id.clone());
+    let announced = shared.wire(&described).to_string();
+    jobs.announce("generation", announced);
     drop(jobs);
     shared.queued.notify_all();
+    shared.changed.notify_all();
     let location = format!("/v1/generations/{id}");
-    let body = serde_json::to_vec(&described).unwrap_or_default();
-    respond(stream, 202, &[("content-type", "application/json"), ("location", &location)], &body)
+    generation(stream, shared, 202, &described, &[("location", &location)])
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -552,11 +833,50 @@ fn events(mut stream: TcpStream, shared: &Shared, id: &str) -> std::io::Result<(
             continue;
         };
         next += 1;
-        write!(stream, "data: {}\n\n", serde_json::to_string(&event).unwrap_or_default())?;
+        write!(stream, "data: {}\n\n", shared.wire(&event))?;
         stream.flush()?;
         if event.is_finished() {
             return Ok(());
         }
+    }
+}
+
+/// `GET /v1/events`: a snapshot of every generation, then each announcement as it is made, and
+/// a fresh snapshot for a client that fell further behind than the announcements kept.
+fn all_events(mut stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
+    let (snapshot, mut next) = {
+        let jobs = shared.lock();
+        (shared.list(&jobs.generations()), jobs.announcements)
+    };
+    write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n")?;
+    write!(stream, "event: snapshot\ndata: {snapshot}\n\n")?;
+    stream.flush()?;
+    loop {
+        let event = {
+            let mut jobs = shared.lock();
+            loop {
+                let oldest = jobs.announcements - jobs.announced.len() as u64;
+                if next < oldest {
+                    next = jobs.announcements;
+                    break Some(("snapshot", shared.list(&jobs.generations())));
+                }
+                if next < jobs.announcements {
+                    let event = jobs.announced[(next - oldest) as usize].clone();
+                    next += 1;
+                    break Some(event);
+                }
+                let (guard, waited) = shared.changed.wait_timeout(jobs, KEEP_ALIVE).unwrap_or_else(std::sync::PoisonError::into_inner);
+                jobs = guard;
+                if waited.timed_out() {
+                    break None;
+                }
+            }
+        };
+        match event {
+            Some((name, data)) => write!(stream, "event: {name}\ndata: {data}\n\n")?,
+            None => write!(stream, ": keep-alive\n\n")?,
+        }
+        stream.flush()?;
     }
 }
 

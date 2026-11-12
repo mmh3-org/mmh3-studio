@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use crate::api::{Error, Generation, ImageRequest, Status};
+use crate::api::{Error, ImageRequest, Status};
 use crate::state::Probe;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,10 +27,48 @@ pub use web::{Net, ask_for_references, save, server};
 /// What the studio asked a server for, by the server's id.
 pub type Requests = HashMap<String, ImageRequest>;
 
+/// How often the status is read, and the list while no event stream says what changed.
 const STATUS_EVERY: Duration = Duration::from_secs(2);
 const LIST_EVERY: u32 = 15;
-const WATCH_RETRY: Duration = Duration::from_millis(500);
-const WATCH_RETRY_MAX: Duration = Duration::from_secs(5);
+const FEED_RETRY: Duration = Duration::from_millis(500);
+const FEED_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// How the studio hears what the server's generations do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Feed {
+    /// Not known yet, or the event stream is being opened again.
+    #[default]
+    Opening,
+    /// `GET /v1/events` is open: every change arrives as it happens, with previews.
+    Streaming,
+    /// The server has no `GET /v1/events`, an upstream one: the list is read every
+    /// [`STATUS_EVERY`] instead, and there are no previews and no cancelling.
+    Polling,
+}
+
+/// Whether a status poll should read the list. While no event stream is open, every poll does.
+/// While one is, the stream says every change but a delete, so the list is read only when what
+/// the server is working through changes, when whether it answers does, or when it has gone
+/// [`LIST_EVERY`] polls unread.
+fn read_list(feed: Feed, last: Option<&Result<Status, Error>>, now: &Result<Status, Error>, polls_since_list: u32) -> bool {
+    if feed != Feed::Streaming {
+        return !matches!(now, Err(e) if e.is_unreachable());
+    }
+    let work = |s: &Status| (s.generations, s.generating.clone(), s.queued);
+    match (last, now) {
+        (Some(Ok(a)), Ok(b)) => work(a) != work(b) || polls_since_list >= LIST_EVERY,
+        (_, Err(e)) if e.is_unreachable() => false,
+        (Some(was), _) => was != now,
+        (None, _) => true,
+    }
+}
+
+/// Whether the server has come back from not answering, when an upstream one may have been
+/// replaced by the fork and the event stream is worth asking for again.
+fn came_back(last: Option<&Result<Status, Error>>, now: &Result<Status, Error>) -> bool {
+    let down = |s: &Result<Status, Error>| matches!(s, Err(e) if e.is_unreachable());
+    last.is_some_and(down) && !down(now)
+}
 
 /// The pictures still to fetch: what the user waits for first, then the gallery's backlog.
 /// `wanted` holds every id queued or being fetched, so a forgotten one is never written.
@@ -77,47 +115,6 @@ impl Queue {
     }
 }
 
-/// Whether a status poll should refresh the list: when what the server is working through
-/// changes, when whether it answers does, or when the list has gone [`LIST_EVERY`] polls
-/// unrefreshed. The count alone misses a delete and a create elsewhere between two polls, and a
-/// generation that fails at once changes neither what runs nor what waits; the last rule catches
-/// what the others miss.
-fn refresh_list(last: Option<&Result<Status, Error>>, now: &Result<Status, Error>, polls_since_list: u32) -> bool {
-    let work = |s: &Status| (s.generations, s.generating.clone(), s.queued);
-    match (last, now) {
-        (Some(Ok(a)), Ok(b)) => work(a) != work(b) || polls_since_list >= LIST_EVERY,
-        (_, Err(e)) if e.is_unreachable() => false,
-        (Some(was), _) => was != now,
-        (None, _) => true,
-    }
-}
-
-/// What to do once a generation's event stream has closed, from what the server says of it now.
-enum AfterStream {
-    /// It finished: land this and stop.
-    Finished(Generation),
-    /// Still going: land this and follow it again.
-    Going(Generation),
-    /// The server no longer has it.
-    Gone,
-    /// The server can't be reached: try again.
-    Retry,
-    /// The server answered in a way the studio can't follow.
-    Lost(Error),
-}
-
-impl AfterStream {
-    fn from(answer: Result<Generation, Error>) -> AfterStream {
-        match answer {
-            Ok(g) if g.is_finished() => AfterStream::Finished(g),
-            Ok(g) => AfterStream::Going(g),
-            Err(Error::Refused { status: 404, .. }) => AfterStream::Gone,
-            Err(e) if e.is_unreachable() => AfterStream::Retry,
-            Err(e) => AfterStream::Lost(e),
-        }
-    }
-}
-
 /// Whether generation `id` writes a picture, from how the server answers for its picture: a
 /// picture still to come or never to come is refused with 409, a video with 404. Continue means
 /// it writes a picture, and the generation should be asked for.
@@ -138,16 +135,36 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_refreshed_when_the_work_changes_even_if_the_count_does_not() {
+    fn beside_a_stream_the_list_is_read_when_the_work_changes_even_if_the_count_does_not() {
+        let refresh = |last: &Result<Status, Error>, now: Result<Status, Error>, polls| read_list(Feed::Streaming, Some(last), &now, polls);
         let idle = Ok(status(3, None, 0));
-        assert!(!refresh_list(Some(&idle), &Ok(status(3, None, 0)), 1));
-        assert!(refresh_list(Some(&idle), &Ok(status(3, Some("g4"), 0)), 1), "a delete and a create elsewhere");
-        assert!(refresh_list(Some(&idle), &Ok(status(3, None, 1)), 1));
-        assert!(refresh_list(Some(&idle), &Ok(status(4, None, 0)), 1));
-        assert!(refresh_list(Some(&idle), &Ok(status(3, None, 0)), LIST_EVERY), "a quiet list is refreshed now and then");
+        assert!(!refresh(&idle, Ok(status(3, None, 0)), 1));
+        assert!(refresh(&idle, Ok(status(3, Some("g4"), 0)), 1), "a delete and a create elsewhere");
+        assert!(refresh(&idle, Ok(status(3, None, 1)), 1));
+        assert!(refresh(&idle, Ok(status(4, None, 0)), 1));
+        assert!(refresh(&idle, Ok(status(3, None, 0)), LIST_EVERY), "a quiet list is read now and then");
         let mut busy = status(3, Some("g4"), 0);
         busy.memory = Some(crate::api::Memory { free: 1, total: 2 });
-        assert!(!refresh_list(Some(&Ok(status(3, Some("g4"), 0))), &Ok(busy), 1), "memory moving is no reason");
-        assert!(refresh_list(None, &idle, 0));
+        assert!(!refresh(&Ok(status(3, Some("g4"), 0)), Ok(busy), 1), "memory moving is no reason");
+        assert!(read_list(Feed::Streaming, None, &idle, 0));
+    }
+
+    #[test]
+    fn without_a_stream_every_poll_reads_the_list_while_the_server_answers() {
+        let idle = Ok(status(3, None, 0));
+        for feed in [Feed::Opening, Feed::Polling] {
+            assert!(read_list(feed, Some(&idle), &Ok(status(3, None, 0)), 1));
+            assert!(!read_list(feed, Some(&idle), &Err(Error::Unreachable("refused".into())), 1));
+        }
+    }
+
+    #[test]
+    fn the_stream_is_asked_for_again_once_the_server_comes_back() {
+        let down: Result<Status, Error> = Err(Error::Unreachable("refused".into()));
+        let up = Ok(status(0, None, 0));
+        assert!(came_back(Some(&down), &up));
+        assert!(!came_back(Some(&up), &up));
+        assert!(!came_back(None, &up));
+        assert!(!came_back(Some(&up), &down));
     }
 }

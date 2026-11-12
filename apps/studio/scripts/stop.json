@@ -1,0 +1,7 @@
+{"events": [
+  {"t": 0.4, "type": "tap", "key": "prompt"},
+  {"t": 0.5, "type": "type", "text": "A night market under paper lanterns"},
+  {"t": 2.6, "type": "key", "name": "Enter", "cmd": true},
+  {"t": 4.6, "type": "tap", "key": "stop"},
+  {"t": 4.7, "type": "mark", "name": "stopped"}
+]}

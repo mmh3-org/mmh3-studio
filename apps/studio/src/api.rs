@@ -1,7 +1,10 @@
 //! `mmh3 server`'s API, as `docs/server.md` in mmh3 describes it: pictures are asked for at
-//! `POST /v1/images` and watched like any other generation. The types and the form are shared;
-//! [`Client`] is the native, blocking client, so run its calls off the UI thread. The web build
-//! speaks the same routes through the browser's `fetch` and `EventSource`.
+//! `POST /v1/images` and watched like any other generation. The studio's fork of mmh3 adds what
+//! a generation asked for, its stage timings, step previews, cancelling and one event stream for
+//! every generation; an upstream server leaves those out, and the studio reads either. The types
+//! and the form are shared; [`Client`] is the native, blocking client, so run its calls off the
+//! UI thread. The web build speaks the same routes through the browser's `fetch` and
+//! `EventSource`.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufRead, BufReader, Read};
@@ -23,18 +26,29 @@ const MAX_PNG_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const SILENCE: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
+    #[default]
     Queued,
     Running,
     Done,
     Failed,
+    /// Stopped on request before it ended; only the fork's server cancels.
+    Cancelled,
 }
 
-/// A generation as the server describes it. It says nothing of what was asked for, nor whether
-/// it writes a picture or a video.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Image,
+    Video,
+}
+
+/// A generation as the server describes it. An upstream server says nothing of what was asked
+/// for, nor whether it writes a picture or a video; the fork's says both, and the fields it adds
+/// are `None` from an upstream one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Generation {
     pub error: Option<String>,
     pub id: String,
@@ -43,31 +57,133 @@ pub struct Generation {
     pub state: State,
     pub step: Option<u32>,
     pub steps: Option<u32>,
-    /// Where a finished generation's time went. Servers that do not report it leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Kind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Asked>,
+    /// Unix times in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<f64>,
+    /// Where a picture's time went, filled in stage by stage as it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timings: Option<Timings>,
+    /// The last step with a preview, counted from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_step: Option<u32>,
 }
 
-/// A finished generation's stages, in seconds. Each is left out when the server did not time it.
+/// What a generation asked for, as the fork's server says it: a picture's defaults where the
+/// request left an option out, and the names its references were uploaded under. A value the
+/// server could not read as a number stays as it was sent, which reads here as none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default, deserialize_with = "number")]
+    pub width: Option<u32>,
+    #[serde(default, deserialize_with = "number")]
+    pub height: Option<u32>,
+    #[serde(default, deserialize_with = "number")]
+    pub seed: Option<u64>,
+    #[serde(default, deserialize_with = "number")]
+    pub min_generation_area: Option<u64>,
+    #[serde(default)]
+    pub attention_precision: Option<String>,
+    #[serde(default)]
+    pub attention: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+}
+
+fn number<'de, D: serde::Deserializer<'de>, T: TryFrom<u64>>(d: D) -> Result<Option<T>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_u64().and_then(|n| T::try_from(n).ok()))
+}
+
+fn list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+    Ok(Option::<Vec<f64>>::deserialize(d)?.unwrap_or_default())
+}
+
+/// A picture's stages, in seconds, as the fork's server times them. A stage not reached yet, or
+/// skipped (the text encoder's when the server kept the encoded prompt), is `None`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Timings {
-    /// Loading models that were not resident.
+    /// Reading the text encoder.
     #[serde(default)]
-    pub load: Option<f64>,
-    /// Reading the prompt and any pictures.
+    pub load_text: Option<f64>,
+    /// Encoding the prompt and the references.
     #[serde(default)]
     pub encode: Option<f64>,
-    /// Each denoising step, in order.
+    /// Reading the `DiT`.
     #[serde(default)]
+    pub load_dit: Option<f64>,
+    /// Each denoising step, in order.
+    #[serde(default, deserialize_with = "list")]
     pub steps: Vec<f64>,
+    /// How long the decode waited for the picture VAE, which is read during the steps.
+    #[serde(default)]
+    pub decode_read: Option<f64>,
     #[serde(default)]
     pub decode: Option<f64>,
+    /// Writing the PNG.
+    #[serde(default)]
+    pub write: Option<f64>,
+}
+
+impl Timings {
+    /// Reading models that were not resident, or `None` when none of it was timed.
+    pub fn load(&self) -> Option<f64> {
+        [self.load_text, self.load_dit, self.decode_read].into_iter().flatten().reduce(|a, b| a + b)
+    }
 }
 
 impl Generation {
     pub fn is_finished(&self) -> bool {
-        matches!(self.state, State::Done | State::Failed)
+        matches!(self.state, State::Done | State::Failed | State::Cancelled)
     }
+}
+
+/// A preview a picture has written, as `GET /v1/events` announces it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preview {
+    pub id: String,
+    pub step: u32,
+    #[serde(default)]
+    pub steps: Option<u32>,
+    pub url: String,
+}
+
+/// One event of `GET /v1/events`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// Every generation, the most recent first: on connecting, and again for a client that fell
+    /// behind.
+    Snapshot(Vec<Generation>),
+    /// One generation whose state or step changed.
+    Generation(Box<Generation>),
+    Preview(Preview),
+}
+
+impl Event {
+    /// The event named `name` with `data`; `None` for a name the studio doesn't know.
+    pub fn parse(name: &str, data: &str) -> Result<Option<Event>, Error> {
+        let malformed = |e: serde_json::Error| Error::Malformed(e.to_string());
+        Ok(Some(match name {
+            "snapshot" => Event::Snapshot(serde_json::from_str::<Generations>(data).map_err(malformed)?.generations),
+            "generation" => Event::Generation(Box::new(serde_json::from_str(data).map_err(malformed)?)),
+            "preview" => Event::Preview(serde_json::from_str(data).map_err(malformed)?),
+            _ => return Ok(None),
+        }))
+    }
+}
+
+/// Whether an answer says the server has no such route: an upstream server, which has no event
+/// stream for every generation, no previews and no cancelling.
+pub fn is_missing_route(e: &Error) -> bool {
+    matches!(e, Error::Refused { status: 404 | 405, .. })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -219,28 +335,41 @@ pub fn multipart(parts: &[Part], boundary: &str) -> (String, Vec<u8>) {
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
-/// Reads server-sent events line by line: `data:` lines gather until a blank line ends the event.
+/// One server-sent event: its name (`message` when it gave none) and its data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SseEvent {
+    pub name: String,
+    pub data: String,
+}
+
+/// Reads server-sent events line by line: `event:` names the event, `data:` lines gather, and a
+/// blank line ends it. Comments, the stream's keep-alives, are skipped.
 #[derive(Default)]
 pub struct SseParser {
+    name: Option<String>,
     data: Vec<String>,
 }
 
 impl SseParser {
-    pub fn line(&mut self, line: &str) -> Option<String> {
+    pub fn line(&mut self, line: &str) -> Option<SseEvent> {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
+            let name = self.name.take();
             if self.data.is_empty() {
                 return None;
             }
-            return Some(std::mem::take(&mut self.data).join("\n"));
+            return Some(SseEvent { name: name.unwrap_or_else(|| "message".to_owned()), data: std::mem::take(&mut self.data).join("\n") });
         }
+        let value = |rest: &str| rest.strip_prefix(' ').unwrap_or(rest).to_owned();
         if let Some(rest) = line.strip_prefix("data:") {
-            self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+            self.data.push(value(rest));
+        } else if let Some(rest) = line.strip_prefix("event:") {
+            self.name = Some(value(rest));
         }
         None
     }
 
-    pub fn finish(&mut self) -> Option<String> {
+    pub fn finish(&mut self) -> Option<SseEvent> {
         self.line("")
     }
 }
@@ -313,29 +442,52 @@ impl Client {
         response.body_mut().with_config().limit(MAX_PNG_BYTES).read_to_vec().map_err(|e| Error::Unreachable(e.to_string()))
     }
 
+    /// Stops a generation: one queued at once, one running at its next step. Answers with the
+    /// generation as it is now. An upstream server has no such route and refuses with 404.
+    pub fn cancel(&self, id: &str) -> Result<Generation, Error> {
+        json(self.quick.post(&self.url(&format!("/v1/generations/{id}/cancel"))).send_empty())
+    }
+
+    /// The PNG a picture previewed after step `step`, counted from 1.
+    pub fn preview(&self, id: &str, step: u32) -> Result<Vec<u8>, Error> {
+        let mut response = checked(self.long.get(&self.url(&format!("/v1/generations/{id}/preview/{step}"))).call())?;
+        response.body_mut().with_config().limit(MAX_PNG_BYTES).read_to_vec().map_err(|e| Error::Unreachable(e.to_string()))
+    }
+
     /// Follows a generation's events until the server closes the stream, handing each to `each`.
-    pub fn events(&self, id: &str, each: impl FnMut(Generation)) -> Result<(), Error> {
+    pub fn events(&self, id: &str, mut each: impl FnMut(Generation)) -> Result<(), Error> {
         let response = checked(self.long.get(&self.url(&format!("/v1/generations/{id}/events"))).header("Accept", "text/event-stream").call())?;
-        read_events(response.into_body().into_reader(), each)
+        read_events(response.into_body().into_reader(), |event| {
+            each(serde_json::from_str(&event.data).map_err(|e| Error::Malformed(e.to_string()))?);
+            Ok(())
+        })
+    }
+
+    /// Follows every generation's events from `GET /v1/events`, which never ends by itself, handing
+    /// each to `each`. An upstream server has no such route and refuses with 404.
+    pub fn feed(&self, mut each: impl FnMut(Event)) -> Result<(), Error> {
+        let response = checked(self.long.get(&self.url("/v1/events")).header("Accept", "text/event-stream").call())?;
+        read_events(response.into_body().into_reader(), |event| {
+            if let Some(event) = Event::parse(&event.name, &event.data)? {
+                each(event);
+            }
+            Ok(())
+        })
     }
 }
 
+/// Hands each event of the stream `reader` to `each` until the stream ends or `each` fails.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_events(reader: impl Read, mut each: impl FnMut(Generation)) -> Result<(), Error> {
+pub fn read_events(reader: impl Read, mut each: impl FnMut(SseEvent) -> Result<(), Error>) -> Result<(), Error> {
     let mut parser = SseParser::default();
-    let mut emit = |data: String| -> Result<(), Error> {
-        let g = serde_json::from_str(&data).map_err(|e| Error::Malformed(e.to_string()))?;
-        each(g);
-        Ok(())
-    };
     for line in BufReader::new(reader).lines() {
         let line = line.map_err(|e| Error::Unreachable(e.to_string()))?;
-        if let Some(data) = parser.line(&line) {
-            emit(data)?;
+        if let Some(event) = parser.line(&line) {
+            each(event)?;
         }
     }
-    if let Some(data) = parser.finish() {
-        emit(data)?;
+    if let Some(event) = parser.finish() {
+        each(event)?;
     }
     Ok(())
 }

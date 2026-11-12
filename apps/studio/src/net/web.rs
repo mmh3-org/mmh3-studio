@@ -1,7 +1,7 @@
 //! The web build's background work. The page is served from the same origin as the server's
-//! `/v1` routes, so every request is a same-origin `fetch` relative to the page, a generation is
-//! followed with `EventSource`, and the browser decodes pictures off the main thread. Work runs
-//! as futures on the page's one thread.
+//! `/v1` routes, so every request is a same-origin `fetch` relative to the page, the server's
+//! generations are followed with `EventSource`, and the browser decodes pictures off the main
+//! thread. Work runs as futures on the page's one thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -21,8 +21,8 @@ use web_sys::{
     ImageOrientation, MessageEvent, OffscreenCanvas, OffscreenCanvasRenderingContext2d, RequestInit, ResizeQuality, Response,
 };
 
-use super::{AfterStream, Queue, Requests, STATUS_EVERY, WATCH_RETRY, WATCH_RETRY_MAX, picture_kind, refresh_list};
-use crate::api::{self, Error, Generation, Generations, ImageRequest, Status};
+use super::{FEED_RETRY, FEED_RETRY_MAX, Feed, Queue, Requests, STATUS_EVERY, came_back, picture_kind, read_list};
+use crate::api::{self, Error, Event, Generation, Generations, ImageRequest, Status};
 use crate::state::{Probe, REFERENCE_EXTENSIONS, State};
 use crate::thumb;
 
@@ -39,6 +39,11 @@ const PICKED: &str = "picked";
 const THUMBS: &str = "mmh3-studio-thumbs";
 /// Where a thumbnail is filed in [`THUMBS`], beside the page.
 const THUMB_PATH: &str = "studio-thumbs/";
+/// The longest side a step preview is decoded at; the server writes them at an eighth of the
+/// canvas, so only a canvas past 8192 is scaled down.
+const PREVIEW_SIDE: u32 = 1024;
+/// The events of `GET /v1/events` the studio follows.
+const FEED_EVENTS: [&str; 3] = ["snapshot", "generation", "preview"];
 
 pub struct Net {
     inner: Rc<Inner>,
@@ -124,15 +129,21 @@ impl Net {
         });
     }
 
-    /// Polls the server's status every two seconds, as the native build does.
+    /// Follows the server as the native build does: its status every two seconds, and its
+    /// generations through `GET /v1/events`, or through the list read with each status from a
+    /// server without it.
     pub fn start(&self) {
-        let inner = self.inner.clone();
+        let link = Rc::new(Link::default());
+        let (inner, l) = (self.inner.clone(), link.clone());
         spawn_local(async move {
             let mut last: Option<Result<Status, Error>> = None;
             let mut polls_since_list = 0;
             loop {
                 let now = inner.json::<Status>("v1/status").await;
-                let refresh = refresh_list(last.as_ref(), &now, polls_since_list);
+                if came_back(last.as_ref(), &now) {
+                    l.reprobe.set(true);
+                }
+                let wanted = read_list(l.feed.get(), last.as_ref(), &now, polls_since_list);
                 polls_since_list += 1;
                 if last.as_ref() != Some(&now) {
                     let status = now.clone();
@@ -141,19 +152,15 @@ impl Net {
                         s.set_status(status);
                     });
                 }
-                if refresh && let Ok(list) = inner.json::<Generations>("v1/generations").await {
+                if wanted && let Ok(list) = inner.json::<Generations>("v1/generations").await {
                     polls_since_list = 0;
-                    prune_thumbs(&list.generations.iter().map(|g| g.id.clone()).collect()).await;
-                    inner.handle.update(move |s, tx| {
-                        tx.instant();
-                        let now = tx.clock();
-                        s.merge(&list.generations, now);
-                    });
+                    land(&inner, Event::Snapshot(list.generations));
                 }
                 last = Some(now);
                 sleep(STATUS_EVERY).await;
             }
         });
+        spawn_local(follow(self.inner.clone(), link));
     }
 
     pub fn submit(&self, local: String, request: ImageRequest) {
@@ -167,47 +174,30 @@ impl Net {
         });
     }
 
-    /// Follows a generation until it finishes, as the native build does: a stream that ends
-    /// early is picked up again and an unreachable server retried.
-    pub fn watch(&self, id: String) {
+    /// Asks the server to stop generation `id`.
+    pub fn cancel(&self, id: String) {
         let inner = self.inner.clone();
         spawn_local(async move {
-            let handle = inner.handle.clone();
-            let land = move |g: Generation| {
-                handle.update(move |s, tx| {
-                    let now = tx.clock();
-                    s.apply(&g, now);
-                });
+            let answer = match inner.fetch("POST", &format!("v1/generations/{id}/cancel"), None, Some(QUICK)).await {
+                Ok(response) => text(&response).await.and_then(|body| serde_json::from_str::<Generation>(&body).map_err(|e| Error::Malformed(e.to_string()))),
+                Err(e) => Err(e),
             };
-            let mut wait = WATCH_RETRY;
-            let lost = loop {
-                if events(&url(&format!("v1/generations/{id}/events")), land.clone()).await {
-                    wait = WATCH_RETRY;
-                }
-                match AfterStream::from(inner.json::<Generation>(&format!("v1/generations/{id}")).await) {
-                    AfterStream::Finished(g) => {
-                        land(g);
-                        break None;
-                    }
-                    AfterStream::Going(g) => land(g),
-                    AfterStream::Gone => {
-                        inner.queue.borrow_mut().forget(&id);
-                        let gone = id.clone();
-                        inner.handle.update(move |s, _| s.deleted(&gone));
-                        break None;
-                    }
-                    AfterStream::Retry => {}
-                    AfterStream::Lost(e) => break Some(e),
-                }
-                sleep(wait).await;
-                wait = (wait * 2).min(WATCH_RETRY_MAX);
-            };
-            inner.handle.update(move |s, _| {
-                s.watch_ended(&id);
-                if let Some(e) = lost {
-                    s.note("Lost track of a generation.", Some(e.to_string()), true);
-                }
+            inner.handle.update(move |s, tx| {
+                let now = tx.clock();
+                s.cancelled(&id, answer, now);
             });
+        });
+    }
+
+    /// Fetches and decodes the preview generation `id` wrote after step `step`.
+    pub fn fetch_preview(&self, id: String, step: u32) {
+        let inner = self.inner.clone();
+        spawn_local(async move {
+            let answer = match inner.blob(Path::new(&format!("v1/generations/{id}/preview/{step}"))).await {
+                Ok(blob) => scaled(&blob, PREVIEW_SIDE).await.map(|(w, h, rgba, _)| inner.images.rgba(w, h, rgba)),
+                Err(e) => Err(e.to_string()),
+            };
+            inner.handle.update(move |s, _| s.preview_ready(&id, step, answer));
         });
     }
 
@@ -400,10 +390,59 @@ async fn sleep(wait: Duration) {
     let _ = JsFuture::from(promise).await;
 }
 
-/// Follows the event stream at `url` until the server closes it, or it fails, handing each
-/// generation to `each`; true when anything arrived. `EventSource` reconnects by itself, so it
-/// is closed at the first error and the caller decides whether to follow again.
-async fn events(url: &str, mut each: impl FnMut(Generation) + 'static) -> bool {
+/// What the status poll and the event stream share.
+#[derive(Default)]
+struct Link {
+    feed: Cell<Feed>,
+    /// The server answers again after it didn't, so a server without the event stream may have
+    /// been replaced by one with it.
+    reprobe: Cell<bool>,
+}
+
+impl Link {
+    fn set(&self, feed: Feed, inner: &Inner) {
+        if self.feed.replace(feed) != feed {
+            inner.handle.update(move |s, _| s.feed = feed);
+        }
+    }
+}
+
+/// Keeps `GET /v1/events` open, opening it again when it drops. `EventSource` hides the status a
+/// refused stream answered with, so the route is asked for once with `fetch` first; a server that
+/// has none is asked again only once it has stopped answering and come back.
+async fn follow(inner: Rc<Inner>, link: Rc<Link>) {
+    let mut wait = FEED_RETRY;
+    loop {
+        match inner.fetch("GET", "v1/events", None, None).await {
+            Ok(response) => {
+                if let Some(body) = response.body() {
+                    let _ = body.cancel();
+                }
+                if stream(&inner, &link, &url("v1/events")).await {
+                    wait = FEED_RETRY;
+                }
+            }
+            Err(e) if api::is_missing_route(&e) => {
+                link.set(Feed::Polling, &inner);
+                while !link.reprobe.replace(false) {
+                    sleep(STATUS_EVERY).await;
+                }
+                continue;
+            }
+            Err(_) => {}
+        }
+        link.set(Feed::Opening, &inner);
+        sleep(wait).await;
+        wait = (wait * 2).min(FEED_RETRY_MAX);
+    }
+}
+
+type Listener = Closure<dyn FnMut(MessageEvent)>;
+
+/// Follows the event stream at `url` until it fails, landing each event; true when anything
+/// arrived. `EventSource` reconnects by itself, so it is closed at the first error and
+/// [`follow`] decides when to open it again.
+async fn stream(inner: &Rc<Inner>, link: &Rc<Link>, url: &str) -> bool {
     let Ok(source) = EventSource::new(url) else { return false };
     let mut resolve: Option<Function> = None;
     let closed = Promise::new(&mut |r, _| resolve = Some(r));
@@ -416,30 +455,54 @@ async fn events(url: &str, mut each: impl FnMut(Generation) + 'static) -> bool {
             let _ = resolve.call0(&JsValue::NULL);
         }
     };
-    let on_message = {
-        let (heard, end) = (heard.clone(), end.clone());
-        Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-            let Some(data) = event.data().as_string() else { return };
-            match serde_json::from_str::<Generation>(&data) {
-                Ok(g) => {
-                    heard.set(true);
-                    let finished = g.is_finished();
-                    each(g);
-                    if finished {
-                        end();
+    let listeners: Vec<(&str, Listener)> = FEED_EVENTS
+        .iter()
+        .map(|&name| {
+            let (inner, link, heard, end) = (inner.clone(), link.clone(), heard.clone(), end.clone());
+            let on_event = Listener::new(move |event: MessageEvent| {
+                let Some(data) = event.data().as_string() else { return };
+                match Event::parse(name, &data) {
+                    Ok(Some(event)) => {
+                        if !heard.replace(true) {
+                            link.set(Feed::Streaming, &inner);
+                        }
+                        land(&inner, event);
                     }
+                    Ok(None) => {}
+                    Err(_) => end(),
                 }
-                Err(_) => end(),
-            }
+            });
+            (name, on_event)
         })
-    };
+        .collect();
+    for (name, listener) in &listeners {
+        let _ = source.add_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
+    }
     let on_error = Closure::<dyn FnMut()>::new(end);
-    source.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     source.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     let _ = JsFuture::from(closed).await;
-    source.set_onmessage(None);
+    for (name, listener) in &listeners {
+        let _ = source.remove_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
+    }
     source.set_onerror(None);
     heard.get()
+}
+
+/// Lands what the server said of its generations in the state.
+fn land(inner: &Rc<Inner>, event: Event) {
+    if let Event::Snapshot(list) = &event {
+        let listed: HashSet<String> = list.iter().map(|g| g.id.clone()).collect();
+        spawn_local(async move { prune_thumbs(&listed).await });
+    }
+    inner.handle.update(move |s, tx| {
+        tx.instant();
+        let now = tx.clock();
+        match event {
+            Event::Snapshot(list) => s.merge(&list, now),
+            Event::Generation(g) => s.upsert(&g, now),
+            Event::Preview(p) => s.preview_available(&p.id, p.step),
+        }
+    });
 }
 
 /// Fetches queued pictures one at a time, the user's first, until the queue is empty.
@@ -472,12 +535,12 @@ async fn picture_thumb(inner: &Inner, id: &str, path: &str, urgent: bool) -> Res
     let cache = thumbs().await;
     if let Some(cache) = &cache
         && let Some(kept) = cached_thumb(cache, id).await
-        && let Ok((w, h, rgba, _)) = scaled(&kept).await
+        && let Ok((w, h, rgba, _)) = scaled(&kept, thumb::SIDE).await
     {
         return Ok(inner.images.rgba(w, h, rgba));
     }
     let blob = inner.blob(Path::new(path)).await.map_err(|e| e.to_string())?;
-    let (w, h, rgba, canvas) = scaled(&blob).await?;
+    let (w, h, rgba, canvas) = scaled(&blob, thumb::SIDE).await?;
     if urgent {
         inner.hold_full(id, &blob);
     }
@@ -524,23 +587,23 @@ async fn probe(inner: &Inner, id: &str) -> Probe {
     if let Some(body) = answer.ok().and_then(|r| r.body()) {
         let _ = body.cancel();
     }
-    inner.json::<Generation>(&format!("v1/generations/{id}")).await.map_or(Probe::Unanswered, Probe::Picture)
+    inner.json::<Generation>(&format!("v1/generations/{id}")).await.map_or(Probe::Unanswered, |g| Probe::Picture(Box::new(g)))
 }
 
 /// A gallery thumbnail: the browser decodes the picture and scales it down off the main
 /// thread, so a 16 MP PNG costs the page only the small copy it reads back.
 async fn thumbnail(blob: &Blob) -> Result<(u32, u32, Vec<u8>), String> {
-    scaled(blob).await.map(|(w, h, rgba, _)| (w, h, rgba))
+    scaled(blob, thumb::SIDE).await.map(|(w, h, rgba, _)| (w, h, rgba))
 }
 
-/// [`thumbnail`], with the canvas it was drawn on.
-async fn scaled(blob: &Blob) -> Result<(u32, u32, Vec<u8>, OffscreenCanvas), String> {
+/// The picture in `blob`, decoded and scaled to fit `side`, with the canvas it was drawn on.
+async fn scaled(blob: &Blob, side: u32) -> Result<(u32, u32, Vec<u8>, OffscreenCanvas), String> {
     let window = web_sys::window().ok_or("no window")?;
     let options = ImageBitmapOptions::new();
     options.set_image_orientation(ImageOrientation::FromImage);
     let promise = window.create_image_bitmap_with_blob_and_image_bitmap_options(blob, &options).map_err(|e| js_error(&e))?;
     let full: ImageBitmap = JsFuture::from(promise).await.map_err(|e| js_error(&e))?.unchecked_into();
-    let (w, h) = thumb::fit(full.width(), full.height(), thumb::SIDE);
+    let (w, h) = thumb::fit(full.width(), full.height(), side);
     let options = ImageBitmapOptions::new();
     options.set_resize_width(w);
     options.set_resize_height(h);

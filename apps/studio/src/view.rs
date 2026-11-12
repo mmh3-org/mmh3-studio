@@ -113,8 +113,11 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
     let done = g.file().is_some();
     let running = matches!(g.phase, Phase::Running { .. } | Phase::Sending);
     let item = |label: &str| rune_kit::MenuItem::new(label);
-    let known = g.request.is_some();
+    let known = g.is_known();
+    let rerunnable = g.rerun_request().is_some();
+    let stoppable = s.can_stop(g);
     let edit = id.to_owned();
+    let stop = id.to_owned();
     let (a, c, d, e, f) = (id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
     let menu =
         context_menu("gallery-menu", trigger, Some(at)).item(item("Save PNG…").icon(&icons::SAVE).disabled(!done).on_select_tx(move |s: &mut State, tx| {
@@ -142,11 +145,15 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
         s.menu = None;
         tx.copy(d.clone());
     }))
-    .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected() || !known).on_select(move |s: &mut State| {
+    .item(item("Re-run with a new seed").icon(&icons::RERUN).disabled(!s.connected() || !rerunnable).on_select(move |s: &mut State| {
         s.menu = None;
         s.rerun(&e);
     }))
     .separator()
+    .item(item("Stop").icon(&icons::STOP).disabled(!stoppable).on_select(move |s: &mut State| {
+        s.menu = None;
+        s.stop(&stop);
+    }))
     .item(item("Delete").icon(&icons::TRASH).danger(true).disabled(running).on_select(move |s: &mut State| {
         s.menu = None;
         s.delete(&f);

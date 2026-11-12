@@ -84,10 +84,10 @@ pub fn fit(samples: impl IntoIterator<Item = Sample>) -> Model {
         let decode = median(timed.iter().filter_map(|(mp, _, t)| t.decode.map(|d| d / m.decode_at(*mp)))).unwrap_or(step);
         let fixed = median(timed.iter().map(|(mp, total, t)| {
             let decoded = t.decode.unwrap_or_else(|| m.decode_at(*mp) * decode);
-            (total - t.load.unwrap_or(0.0) - t.steps.iter().sum::<f64>() - decoded) / m.fixed
+            (total - t.load().unwrap_or(0.0) - t.steps.iter().sum::<f64>() - decoded) / m.fixed
         }))
         .unwrap_or(step);
-        let load = median(timed.iter().filter_map(|(_, _, t)| t.load.map(|l| l / m.load))).unwrap_or(step);
+        let load = median(timed.iter().filter_map(|(_, _, t)| t.load().map(|l| l / m.load))).unwrap_or(step);
         return m.scaled(fixed, step, decode, load);
     }
     match median(samples.iter().map(|s| s.seconds / m.warm(s.mp))) {
@@ -171,8 +171,16 @@ mod tests {
     #[test]
     fn stage_timings_fit_each_part() {
         let full = mp(4096, 4096);
-        let timings = Timings { load: Some(12.0), encode: Some(1.0), steps: vec![40.0; 6], decode: Some(10.0) };
-        let total = 12.0 + 240.0 + 10.0 + 6.0;
+        let timings = Timings {
+            load_text: Some(4.0),
+            encode: Some(1.0),
+            load_dit: Some(8.0),
+            steps: vec![40.0; 6],
+            decode_read: Some(0.0),
+            decode: Some(10.0),
+            write: Some(0.5),
+        };
+        let total = 12.0 + 1.0 + 240.0 + 10.0 + 0.5 + 4.5;
         let fitted = fit([Sample { mp: full, seconds: total, timings: Some(timings) }]);
         assert!((fitted.step_at(full) - 40.0).abs() < 1e-9);
         assert!((fitted.decode_at(full) - 10.0).abs() < 1e-9);

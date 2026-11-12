@@ -4,13 +4,14 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rune::{AppHandle, ImageCache, Tx};
 
-use super::{AfterStream, Queue, Requests, STATUS_EVERY, WATCH_RETRY, WATCH_RETRY_MAX, picture_kind, refresh_list};
-use crate::api::{self, Client, Error, Generation, ImageRequest, Status};
+use super::{FEED_RETRY, FEED_RETRY_MAX, Feed, Queue, Requests, STATUS_EVERY, came_back, picture_kind, read_list};
+use crate::api::{self, Client, Error, Event, ImageRequest, Status};
 use crate::state::{Probe, REFERENCE_EXTENSIONS, State};
 use crate::thumb::{self, thumbnail};
 
@@ -196,16 +197,20 @@ impl Net {
         let _ = self.remember.send(requests);
     }
 
-    /// Polls the server's status every two seconds, landing it only when it changes, and
-    /// refreshes the list when [`refresh_list`] says to.
+    /// Follows the server: its status every two seconds, and its generations through
+    /// `GET /v1/events`, or through the list read with each status from a server without it.
     pub fn start(&self) {
-        let (h, c, p) = (self.handle.clone(), self.client.clone(), self.pictures.clone());
+        let link = Arc::new(Link::default());
+        let (h, c, p, l) = (self.handle.clone(), self.client.clone(), self.pictures.clone(), link.clone());
         let _ = rune::task::spawn("mmh3-status", move || {
             let mut last: Option<Result<Status, Error>> = None;
             let mut polls_since_list = 0;
             loop {
                 let now = c.status();
-                let refresh = refresh_list(last.as_ref(), &now, polls_since_list);
+                if came_back(last.as_ref(), &now) {
+                    l.reprobe.store(true, Ordering::Relaxed);
+                }
+                let wanted = read_list(l.feed(), last.as_ref(), &now, polls_since_list);
                 polls_since_list += 1;
                 if last.as_ref() != Some(&now) {
                     let status = now.clone();
@@ -214,19 +219,16 @@ impl Net {
                         s.set_status(status);
                     });
                 }
-                if refresh && let Ok(list) = c.list() {
+                if wanted && let Ok(list) = c.list() {
                     polls_since_list = 0;
-                    p.prune(&list.iter().map(|g| g.id.clone()).collect());
-                    h.update(move |s, tx| {
-                        tx.instant();
-                        let now = tx.clock();
-                        s.merge(&list, now);
-                    });
+                    land(&h, &p, Event::Snapshot(list));
                 }
                 last = Some(now);
                 rune::task::sleep(STATUS_EVERY);
             }
         });
+        let (h, c, p) = (self.handle.clone(), self.client.clone(), self.pictures.clone());
+        let _ = rune::task::spawn("mmh3-events", move || follow(&h, &c, &p, &link));
     }
 
     pub fn submit(&self, local: String, request: ImageRequest) {
@@ -240,52 +242,28 @@ impl Net {
         });
     }
 
-    /// Follows a generation until it finishes. A stream that ends early is picked up again, and
-    /// an unreachable server is retried, so the row never stays stuck at its last step; a
-    /// generation the server no longer has is dropped.
-    pub fn watch(&self, id: String) {
-        let (h, c, p) = (self.handle.clone(), self.client.clone(), self.pictures.clone());
-        let _ = rune::task::spawn("mmh3-events", move || {
-            let land = |g: Generation| {
-                h.update(move |s, tx| {
-                    let now = tx.clock();
-                    s.apply(&g, now);
-                });
-            };
-            let mut wait = WATCH_RETRY;
-            let lost = loop {
-                let mut heard = false;
-                let _ = c.events(&id, |g| {
-                    heard = true;
-                    land(g);
-                });
-                if heard {
-                    wait = WATCH_RETRY;
-                }
-                match AfterStream::from(c.generation(&id)) {
-                    AfterStream::Finished(g) => {
-                        land(g);
-                        break None;
-                    }
-                    AfterStream::Going(g) => land(g),
-                    AfterStream::Gone => {
-                        p.forget([id.as_str()]);
-                        let gone = id.clone();
-                        h.update(move |s, _| s.deleted(&gone));
-                        break None;
-                    }
-                    AfterStream::Retry => {}
-                    AfterStream::Lost(e) => break Some(e),
-                }
-                rune::task::sleep(wait);
-                wait = (wait * 2).min(WATCH_RETRY_MAX);
-            };
-            h.update(move |s, _| {
-                s.watch_ended(&id);
-                if let Some(e) = lost {
-                    s.note("Lost track of a generation.", Some(e.to_string()), true);
-                }
+    /// Asks the server to stop generation `id`.
+    pub fn cancel(&self, id: String) {
+        let (h, c) = (self.handle.clone(), self.client.clone());
+        let _ = rune::task::spawn("mmh3-cancel", move || {
+            let answer = c.cancel(&id);
+            h.update(move |s, tx| {
+                let now = tx.clock();
+                s.cancelled(&id, answer, now);
             });
+        });
+    }
+
+    /// Fetches and decodes the preview generation `id` wrote after step `step`.
+    pub fn fetch_preview(&self, id: String, step: u32) {
+        let (h, c, images) = (self.handle.clone(), self.client.clone(), self.images.clone());
+        let _ = rune::task::spawn("mmh3-preview", move || {
+            let decoded = c.preview(&id, step).map_err(|e| e.to_string()).and_then(|png| image::load_from_memory(&png).map_err(|e| e.to_string()));
+            let answer = decoded.map(|img| {
+                let rgba = img.into_rgba8();
+                images.rgba(rgba.width(), rgba.height(), rgba.into_raw())
+            });
+            h.update(move |s, _| s.preview_ready(&id, step, answer));
         });
     }
 
@@ -327,6 +305,75 @@ impl Net {
     }
 }
 
+/// What the status poll and the event stream share.
+#[derive(Default)]
+struct Link {
+    feed: Mutex<Feed>,
+    /// The server answers again after it didn't, so a server without the event stream may have
+    /// been replaced by one with it.
+    reprobe: AtomicBool,
+}
+
+impl Link {
+    fn feed(&self) -> Feed {
+        *self.feed.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set(&self, feed: Feed, handle: &AppHandle<State>) {
+        let was = std::mem::replace(&mut *self.feed.lock().unwrap_or_else(std::sync::PoisonError::into_inner), feed);
+        if was != feed {
+            handle.update(move |s, _| s.feed = feed);
+        }
+    }
+}
+
+/// Keeps `GET /v1/events` open, opening it again when it drops. A server that has no such route
+/// is asked again only once it has stopped answering and come back.
+fn follow(h: &AppHandle<State>, c: &Client, p: &Pictures, link: &Link) {
+    let mut wait = FEED_RETRY;
+    loop {
+        let mut opened = false;
+        let answer = c.feed(|event| {
+            if !opened {
+                opened = true;
+                link.set(Feed::Streaming, h);
+            }
+            land(h, p, event);
+        });
+        if opened {
+            wait = FEED_RETRY;
+        }
+        if let Err(e) = &answer
+            && api::is_missing_route(e)
+        {
+            link.set(Feed::Polling, h);
+            while !link.reprobe.swap(false, Ordering::Relaxed) {
+                rune::task::sleep(STATUS_EVERY);
+            }
+            continue;
+        }
+        link.set(Feed::Opening, h);
+        rune::task::sleep(wait);
+        wait = (wait * 2).min(FEED_RETRY_MAX);
+    }
+}
+
+/// Lands what the server said of its generations in the state.
+fn land(h: &AppHandle<State>, p: &Pictures, event: Event) {
+    if let Event::Snapshot(list) = &event {
+        p.prune(&list.iter().map(|g| g.id.clone()).collect());
+    }
+    h.update(move |s, tx| {
+        tx.instant();
+        let now = tx.clock();
+        match event {
+            Event::Snapshot(list) => s.merge(&list, now),
+            Event::Generation(g) => s.upsert(&g, now),
+            Event::Preview(p) => s.preview_available(&p.id, p.step),
+        }
+    });
+}
+
 /// Whether generation `id` writes a picture, from how the server answers for its picture: a
 /// picture still to come or never to come is refused with 409, a video with 404. A picture
 /// already written is kept, since it was sent anyway.
@@ -338,7 +385,7 @@ fn probe(client: &Client, pictures: &Pictures, id: &str) -> Probe {
     if let Ok(png) = answer {
         let _ = pictures.store(id, &png);
     }
-    client.generation(id).map_or(Probe::Unanswered, Probe::Picture)
+    client.generation(id).map_or(Probe::Unanswered, |g| Probe::Picture(Box::new(g)))
 }
 
 /// An unreadable file is as good as none: it only costs the prompts of old generations.
@@ -452,11 +499,11 @@ mod tests {
 
     #[test]
     fn a_probe_tells_pictures_from_videos_and_keeps_a_finished_png() {
-        use crate::api::{Part, multipart};
+        use crate::api::{Generation, Part, multipart};
         use crate::mock::{self, Config};
 
         let ms = Duration::from_millis;
-        let addr = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10) }).unwrap();
+        let addr = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10), upstream: true }).unwrap();
         let client = Client::new(format!("http://{addr}"));
         let dir = std::env::temp_dir().join(format!("mmh3-studio-probe-{}", std::process::id()));
         let pictures = Pictures { dir: dir.clone(), queue: Mutex::default() };

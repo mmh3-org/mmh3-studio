@@ -3,7 +3,7 @@ use std::borrow::Cow;
 #[cfg(not(target_arch = "wasm32"))]
 use rune::DragItem;
 
-use rune::{El, SurfaceFit, col, el, memo, row, text};
+use rune::{Color, El, SurfaceFit, col, el, memo, row, text};
 use rune_kit::shell::Sidebar;
 use rune_kit::{Kit, Progress, Spinner};
 
@@ -53,7 +53,7 @@ pub fn elapsed(since: f64, clock: f64) -> String {
 /// far along that is.
 pub fn stage(g: &Gen, step: Option<u32>, steps: u32) -> (String, f32) {
     match step {
-        None if g.references().is_empty() => ("Reading the prompt".into(), 0.0),
+        None if !g.has_references() => ("Reading the prompt".into(), 0.0),
         None => ("Reading the prompt and pictures".into(), 0.0),
         Some(k) if k < steps => (format!("Step {} of {steps}", k + 1), k as f32 / steps.max(1) as f32),
         Some(_) => ("Decoding the picture".into(), 1.0),
@@ -61,36 +61,53 @@ pub fn stage(g: &Gen, step: Option<u32>, steps: u32) -> (String, f32) {
 }
 
 pub fn title(g: &Gen) -> String {
-    match &g.request {
-        None => "Asked for elsewhere".to_owned(),
-        Some(r) if r.prompt.is_empty() => "Untitled".to_owned(),
-        Some(r) => r.prompt.replace('\n', " "),
+    match g.prompt() {
+        _ if !g.is_known() => "Asked for elsewhere".to_owned(),
+        "" => "Untitled".to_owned(),
+        prompt => prompt.replace('\n', " "),
     }
 }
 
-fn status_line(g: &Gen, clock: f64, k: &Kit) -> (String, rune::Color) {
+/// How far a cancelled generation got.
+pub fn stopped_after(step: Option<u32>) -> String {
+    match step {
+        None => "Cancelled before its first step".to_owned(),
+        Some(1) => "Cancelled after 1 step".to_owned(),
+        Some(k) => format!("Cancelled after {k} steps"),
+    }
+}
+
+fn status_line(g: &Gen, clock: f64, k: &Kit) -> (String, Color) {
     let c = &k.c;
     match &g.phase {
         Phase::Sending => ("Sending…".into(), c.text_faint),
+        Phase::Queued if g.stopping => ("Cancelling…".into(), c.text_faint),
         Phase::Queued => ("Queued".into(), c.text_faint),
+        Phase::Running { since, .. } if g.stopping => (format!("Stopping after this step · {}", elapsed(*since, clock)), c.text_muted),
         Phase::Running { step, steps, since } => (format!("{} · {}", stage(g, *step, *steps).0, elapsed(*since, clock)), c.text_muted),
         Phase::Done { seconds, .. } => match g.size() {
             Some((w, h)) => (format!("{w}×{h} · {seconds:.1} s"), c.text_faint),
             None => (format!("{seconds:.1} s"), c.text_faint),
         },
         Phase::Failed(_) => ("Failed".into(), c.danger.fg),
+        Phase::Cancelled { .. } => ("Cancelled".into(), c.text_faint),
     }
 }
 
 fn thumb(g: &Gen, k: &Kit) -> El {
     let c = &k.c;
     let mut t = el().key("thumb").size(THUMB_PT, THUMB_PT).radius(6.0).fill(c.layer_02).center().border(0.5, c.border_muted);
-    t = match (&g.phase, &g.picture) {
-        (_, Picture::Ready { thumb: Some(img), .. }) => {
-            t.child(el().key("thumb-image").size(THUMB_PT, THUMB_PT).radius(6.0).pixels_fit(img.pixels(), SurfaceFit::Fill))
+    let image = |img: &rune::Image| el().key("thumb-image").size(THUMB_PT, THUMB_PT).radius(6.0).pixels_fit(img.pixels(), SurfaceFit::Fill);
+    t = match (&g.phase, &g.picture, &g.live) {
+        (_, Picture::Ready { thumb: Some(img), .. }, _) => t.child(image(img)),
+        (Phase::Running { steps, .. }, _, Some(live)) => t.child(image(&live.image)).child(step_badge(live.step, *steps, k)),
+        (Phase::Cancelled { .. }, _, Some(live)) => t.child(image(&live.image).opacity(0.55)),
+        (Phase::Done { .. }, _, Some(live)) => t.child(image(&live.image)),
+        (Phase::Running { .. } | Phase::Sending | Phase::Queued, ..) | (_, Picture::Loading, _) => {
+            t.child(Spinner::new().size(14.0).color(c.icon_faint).build(k))
         }
-        (Phase::Running { .. } | Phase::Sending | Phase::Queued, _) | (_, Picture::Loading) => t.child(Spinner::new().size(14.0).color(c.icon_faint).build(k)),
-        (Phase::Failed(_), _) => t.child(text("!").font(k.ty.ui_medium).color(c.danger.fg)),
+        (Phase::Failed(_), ..) => t.child(text("!").font(k.ty.ui_medium).color(c.danger.fg)),
+        (Phase::Cancelled { .. }, ..) => t.child(text("–").font(k.ty.ui_medium).color(c.text_faint)),
         _ => t,
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -98,6 +115,18 @@ fn thumb(g: &Gen, k: &Kit) -> El {
         t = t.drag_out(move |_: &State| Some(DragItem::new().file(file.clone())));
     }
     t.a11y_hidden()
+}
+
+/// Which step a preview shows, over its corner.
+pub fn step_badge(step: u32, steps: u32, k: &Kit) -> El {
+    row()
+        .key("step-badge")
+        .pin(None, None, Some(3.0), Some(3.0))
+        .px(4.0)
+        .py(1.0)
+        .radius(4.0)
+        .fill(Color::BLACK.alpha(0.62))
+        .child(text(format!("{step}/{steps}")).font(k.ty.small.features("'tnum' 1")).color(Color::WHITE))
 }
 
 fn build_row(g: &Gen, selected: bool, clock: f64, k: &Kit) -> El {

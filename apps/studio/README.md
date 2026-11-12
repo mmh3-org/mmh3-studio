@@ -20,9 +20,11 @@ just studio::run
 
 The studio connects to `http://127.0.0.1:8833`. To use another address, pass `--server http://host:port` or set `MMH3_SERVER`. If the server isn't running, the studio shows the command that starts it and tries again every two seconds.
 
-The studio speaks the API in mmh3's `docs/server.md`: it asks for a picture at `POST /v1/images`, follows `GET /v1/generations/{id}/events`, and fetches the PNG from `GET /v1/generations/{id}/image`. The server answers with an id, a state, the step a generation is on and the seconds it took, and nothing of what was asked, so the studio keeps the prompt, size and seed of each generation it asked for itself.
+The studio speaks the API in `docs/server.md` of the `studio` branch of [ryoppippi/mmh3](https://github.com/ryoppippi/mmh3/tree/studio), the flake's `mmh3`: it asks for a picture at `POST /v1/images`, follows every generation through `GET /v1/events`, and fetches the PNG from `GET /v1/generations/{id}/image`. That server also says what each generation asked for and where its time went, which the studio shows and fits its time estimates to, writes a preview after each step, which the studio shows in the picture pane and the gallery while a picture runs, and stops a generation at `POST /v1/generations/{id}/cancel`, which the Stop button asks for.
 
-To try the studio without the engine, run the mock server in place of `mmh3 server`. It answers the same routes with the same JSON, status codes and event stream: six timed steps, then a painted PNG. It checks a picture's fields as `mmh3 image` does, so a bad value fails the generation, and a prompt that contains `[fail]` fails after its steps.
+An upstream `mmh3 server` has none of that. The studio notices that `GET /v1/events` is missing and reads `GET /v1/generations` every two seconds instead, without previews or Stop, and keeps the prompt, size and seed of each generation it asked for itself, since that server never says them.
+
+To try the studio without the engine, run the mock server in place of `mmh3 server`. It answers the same routes with the same JSON, status codes and event streams: six timed steps, each with a preview, then a painted PNG. It checks a picture's fields as `mmh3 image` does, so a bad value fails the generation, and a prompt that contains `[fail]` fails after its steps. `--upstream` makes it answer as an upstream server does.
 
 ```sh
 just studio::mock-server   # in place of `just server`
@@ -97,6 +99,8 @@ The screenshot script first renders the fixture scenes, which never touch the ne
 - `disconnected`
 - `running`
 - `gallery`
+- `previewing`
+- `cancelled`
 - `failed`
 - `custom-size`
 - `offline-selected`
@@ -105,7 +109,7 @@ The screenshot script first renders the fixture scenes, which never touch the ne
 - `references`
 - `power`
 
-It then runs the studio headless with `--realtime` against the mock server. In that run, `scripts/generate.json` queues two 16 MP generations. To render a single scene:
+It then runs the studio headless with `--realtime` against the mock server. In that run, `scripts/generate.json` queues two 16 MP generations, against the mock and against the mock with `--upstream`, and `scripts/stop.json` stops one partway. To render a single scene:
 
 ```sh
 ../../target/release/mmh3-studio --snap out.png --scene gallery --theme dark --scale 2

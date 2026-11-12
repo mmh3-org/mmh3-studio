@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn the_page_and_the_api_share_one_origin() {
         let ms = Duration::from_millis;
-        let server = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10) }).unwrap();
+        let server = mock::spawn("127.0.0.1:0", Config { text: ms(10), step: ms(10), decode: ms(10), ..Config::default() }).unwrap();
         let dir = std::env::temp_dir().join(format!("mmh3-studio-proxy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), "<!doctype html>studio").unwrap();

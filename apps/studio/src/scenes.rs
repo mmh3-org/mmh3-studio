@@ -3,11 +3,12 @@
 use std::path::PathBuf;
 
 use crate::api::{Generation, ImageRequest, Memory, State as Remote, Status, Timings};
-use crate::mock::paint;
+use crate::mock::{paint, preview};
+use crate::net::Feed;
 use crate::power::{Chip, Mode, Power, Source};
 
 use crate::sizes::Quality;
-use crate::state::{Conn, Gen, Phase, Picture, Reference, SizeChoice, State, Thumb};
+use crate::state::{Conn, Gen, Live, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
 type Scene = (&'static str, fn(&mut State));
 
@@ -15,6 +16,8 @@ pub const SCENES: &[Scene] = &[
     ("empty", empty),
     ("disconnected", disconnected),
     ("running", running),
+    ("previewing", previewing),
+    ("cancelled", cancelled),
     ("gallery", gallery),
     ("failed", failed),
     ("custom-size", custom_size),
@@ -51,7 +54,7 @@ pub fn disconnected(s: &mut State) {
 }
 
 fn remote(id: &str, state: Remote) -> Generation {
-    Generation { error: None, id: id.into(), queued: 1_762_849_000, seconds: None, state, step: None, steps: None, timings: None }
+    Generation { id: id.into(), queued: 1_762_849_000, state, ..Generation::default() }
 }
 
 /// What the studio remembers asking for `id`, which the server never repeats.
@@ -90,7 +93,14 @@ fn library(s: &mut State) {
     let list = vec![
         done(s, "7c01aa2e0004", "Paper boats drifting across a rain puddle on cobblestones, reflections of neon signs", 912, (4736, 3552), 236.4),
         Generation {
-            timings: Some(Timings { load: None, encode: Some(1.6), steps: vec![37.4, 37.9, 38.0, 37.8, 38.1, 38.2], decode: Some(5.8) }),
+            timings: Some(Timings {
+                encode: Some(1.6),
+                steps: vec![37.4, 37.9, 38.0, 37.8, 38.1, 38.2],
+                decode_read: Some(0.0004),
+                decode: Some(5.8),
+                write: Some(0.21),
+                ..Timings::default()
+            }),
             ..done(s, "7c01aa2e0003", "A lighthouse on a basalt cliff at dusk, long exposure, sea mist", 4127, (5472, 3072), 241.8)
         },
         done(s, "7c01aa2e0002", "Isometric illustration of a tiny greenhouse full of succulents", 77, (2048, 2048), 38.7),
@@ -119,6 +129,46 @@ pub fn running(s: &mut State) {
     s.prompt.replace_text("A cathedral made of glass in a pine forest, morning fog, volumetric light");
     s.size = SizeChoice { quality: Quality::Final, aspect: 0 };
     s.selected = Some("7c01aa2e0005".into());
+}
+
+/// A step preview of `id`, painted at an eighth of its size as the server writes them.
+fn live(s: &mut State, id: &str, step: u32) {
+    let Some(g) = s.gens.iter().find(|g| g.id == id) else { return };
+    let Some(((w, h), seed)) = g.size().zip(g.seed()) else { return };
+    let png = preview(w / 8, h / 8, seed, step, crate::api::IMAGE_STEPS);
+    let Ok(img) = image::load_from_memory(&png) else { return };
+    let rgba = img.into_rgba8();
+    let image = s.images.rgba(rgba.width(), rgba.height(), rgba.into_raw());
+    let _ = image.wait();
+    if let Some(g) = s.gens.iter_mut().find(|g| g.id == id) {
+        g.preview_step = Some(step);
+        g.live = Some(Live { step, image });
+    }
+}
+
+/// The fork's server: the running picture shows its latest preview and can be stopped.
+pub fn previewing(s: &mut State) {
+    running(s);
+    s.feed = Feed::Streaming;
+    if let Some(g) = s.gens.iter_mut().find(|g| g.id == "7c01aa2e0005")
+        && let Phase::Running { step, .. } = &mut g.phase
+    {
+        *step = Some(3);
+    }
+    live(s, "7c01aa2e0005", 3);
+}
+
+/// A picture stopped after its fourth step, with the preview it had got to.
+pub fn cancelled(s: &mut State) {
+    s.conn = Conn::Connected(status(false, 0));
+    s.feed = Feed::Streaming;
+    library(s);
+    asked(s, "7c01aa2e0008", "A night market under paper lanterns, rain on the awnings", 404, (4096, 2304));
+    let stopped = Generation { seconds: Some(141.0), preview_step: Some(4), ..remote("7c01aa2e0008", Remote::Cancelled) };
+    let request = s.requests.get("7c01aa2e0008").cloned();
+    s.gens.insert(0, Gen::from_server(&stopped, request, 0.0));
+    live(s, "7c01aa2e0008", 4);
+    s.selected = Some("7c01aa2e0008".into());
 }
 
 pub fn gallery(s: &mut State) {

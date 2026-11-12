@@ -3,7 +3,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::{self, Generation, ImageRequest, Status, Timings};
+use crate::api::{self, Asked, Generation, ImageRequest, Kind, Status, Timings};
 use crate::estimate::{self, Model, Sample};
 use crate::power::{Issue, Power};
 use crate::sizes::{self, ASPECTS, Quality, SizeError};
@@ -12,16 +12,11 @@ use rune::machine::Effects;
 use rune::{Image, ImageCache, PointerPress, TextEdit, Tx};
 use rune_kit::shell::PaneState;
 
-use crate::net::Net;
+use crate::net::{Feed, Net};
 
 /// Thumbnails kept decoded, newest first; older rows show a placeholder.
 pub const MAX_THUMBS: usize = 240;
 pub const NOTE_SECONDS: f64 = 4.0;
-/// Generations followed through an event stream at once. Each stream holds a connection open
-/// until its generation ends, and a browser gives a page six to its server over HTTP/1.1, so
-/// the status poll, picture fetches and submissions keep the rest. The others wait their turn,
-/// and the list, refreshed as the queue moves, keeps their rows current meanwhile.
-pub const MAX_WATCHES: usize = 3;
 
 pub enum Conn {
     Connecting,
@@ -48,6 +43,10 @@ pub enum Phase {
         timings: Option<Timings>,
     },
     Failed(String),
+    /// Stopped on request; `step` is how many steps it took.
+    Cancelled {
+        step: Option<u32>,
+    },
 }
 
 impl Phase {
@@ -58,7 +57,6 @@ impl Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
-    Watch,
     FetchImage,
 }
 
@@ -76,11 +74,11 @@ pub fn step(phase: &mut Phase, g: &Generation, now: f64) -> Effects<Effect> {
         }
         api::State::Done => Phase::Done { seconds: g.seconds.unwrap_or_default(), timings: g.timings.clone() },
         api::State::Failed => Phase::Failed(g.error.clone().unwrap_or_else(|| "The server gave no reason.".into())),
+        api::State::Cancelled => Phase::Cancelled { step: g.preview_step.or(g.timings.as_ref().map(|t| t.steps.len() as u32)).filter(|k| *k > 0) },
     };
     match (&was, &*phase) {
         (Phase::Done { .. }, _) => Effects::none(),
         (_, Phase::Done { .. }) => Effects::one(Effect::FetchImage),
-        (Phase::Sending, p) if p.is_active() => Effects::one(Effect::Watch),
         _ => Effects::none(),
     }
 }
@@ -89,7 +87,7 @@ pub fn step(phase: &mut Phase, g: &Generation, now: f64) -> Effects<Effect> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Probe {
     /// It writes a picture, and this is where it is now.
-    Picture(Generation),
+    Picture(Box<Generation>),
     /// It writes a video, or is gone.
     NotAPicture,
     Unanswered,
@@ -102,39 +100,124 @@ pub enum Picture {
     Failed(String),
 }
 
+/// The latest step preview of a picture, decoded.
+pub struct Live {
+    pub step: u32,
+    pub image: Image,
+}
+
 pub struct Gen {
     pub id: String,
-    /// What the studio asked for; the server never says, so a picture asked for elsewhere has
-    /// none.
+    /// What the studio asked for, with the files of its references, which only the studio has.
+    /// It is kept for a server that does not say what was asked for, and to run it again.
     pub request: Option<ImageRequest>,
+    /// What the server says was asked for; an upstream server never says.
+    pub asked: Option<Asked>,
     /// When the server took it, which orders the gallery; none before it has.
     pub queued: Option<u64>,
     pub phase: Phase,
     pub picture: Picture,
+    /// The last step the server has a preview of.
+    pub preview_step: Option<u32>,
+    /// The latest preview fetched, shown while it runs and once it was cancelled.
+    pub live: Option<Live>,
+    /// The step of the preview being fetched.
+    pub fetching_preview: Option<u32>,
+    /// The studio asked the server to stop it.
+    pub stopping: bool,
     pub revision: u64,
 }
 
 impl Gen {
+    pub fn new(id: String, request: Option<ImageRequest>, phase: Phase) -> Gen {
+        Gen {
+            id,
+            request,
+            asked: None,
+            queued: None,
+            phase,
+            picture: Picture::None,
+            preview_step: None,
+            live: None,
+            fetching_preview: None,
+            stopping: false,
+            revision: 0,
+        }
+    }
+
     pub fn from_server(g: &Generation, request: Option<ImageRequest>, now: f64) -> Gen {
-        let mut item = Gen { id: g.id.clone(), request, queued: Some(g.queued), phase: Phase::Queued, picture: Picture::None, revision: 0 };
-        let _ = step(&mut item.phase, g, now);
+        let mut item = Gen::new(g.id.clone(), request, Phase::Queued);
+        let _ = item.take(g, now);
         item
     }
 
+    /// Takes in what the server says of it now.
+    fn take(&mut self, g: &Generation, now: f64) -> Effects<Effect> {
+        let effects = step(&mut self.phase, g, now);
+        self.queued = Some(g.queued);
+        if g.request.is_some() {
+            self.asked.clone_from(&g.request);
+        }
+        self.preview_step = self.preview_step.max(g.preview_step);
+        if !self.phase.is_active() {
+            self.stopping = false;
+        }
+        self.revision += 1;
+        effects
+    }
+
+    /// What was asked for, from the server when it says and from the studio's memory otherwise.
     pub fn prompt(&self) -> &str {
-        self.request.as_ref().map_or("", |r| r.prompt.as_str())
+        match (&self.asked, &self.request) {
+            (Some(Asked { prompt: Some(p), .. }), _) => p,
+            (_, Some(r)) => &r.prompt,
+            _ => "",
+        }
     }
 
     pub fn seed(&self) -> Option<u64> {
-        self.request.as_ref().map(|r| r.seed)
+        self.asked.as_ref().and_then(|a| a.seed).or(self.request.as_ref().map(|r| r.seed))
     }
 
     pub fn size(&self) -> Option<(u32, u32)> {
-        self.request.as_ref().map(|r| (r.width, r.height))
+        let asked = self.asked.as_ref().and_then(|a| a.width.zip(a.height));
+        asked.or(self.request.as_ref().map(|r| (r.width, r.height)))
     }
 
-    pub fn references(&self) -> &[PathBuf] {
-        self.request.as_ref().map_or(&[], |r| r.references.as_slice())
+    /// Whether the prompt is known, from the server or from the studio's memory.
+    pub fn is_known(&self) -> bool {
+        self.asked.as_ref().is_some_and(|a| a.prompt.is_some()) || self.request.is_some()
+    }
+
+    /// How many pictures it edits.
+    pub fn reference_count(&self) -> usize {
+        self.asked.as_ref().map_or_else(|| self.request.as_ref().map_or(0, |r| r.references.len()), |a| a.references.len())
+    }
+
+    /// Whether it reads pictures besides the prompt.
+    pub fn has_references(&self) -> bool {
+        self.reference_count() > 0
+    }
+
+    /// What running it again sends: what the server says was asked for, with the studio's files
+    /// of its references. One that edits pictures the studio has no files of can't be sent again.
+    pub fn rerun_request(&self) -> Option<ImageRequest> {
+        let local = self.request.clone();
+        let Some(a) = &self.asked else { return local };
+        let references = match &local {
+            Some(r) if r.references.len() == a.references.len() => r.references.clone(),
+            _ if a.references.is_empty() => Vec::new(),
+            _ => return None,
+        };
+        let (width, height) = self.size()?;
+        Some(ImageRequest {
+            prompt: a.prompt.clone().or(local.as_ref().map(|r| r.prompt.clone()))?,
+            seed: self.seed().unwrap_or_default(),
+            width,
+            height,
+            min_generation_area: a.min_generation_area.or(local.and_then(|r| r.min_generation_area)),
+            references,
+        })
     }
 
     pub fn file(&self) -> Option<&PathBuf> {
@@ -257,9 +340,8 @@ pub struct State {
     pub notes: Vec<Note>,
     pub clock: f64,
     pub tick: u64,
-    pub watching: HashSet<String>,
-    /// Generations to follow once a stream is free.
-    pub to_watch: Vec<String>,
+    /// How the studio hears of the server's generations, which says whether it can stop one.
+    pub feed: Feed,
     /// What the studio asked each of its generations for, by the server's id.
     pub requests: HashMap<String, ImageRequest>,
     /// Generations the server accepted from the studio that no list has shown yet. A list
@@ -328,8 +410,7 @@ impl State {
             notes: Vec::new(),
             clock: 0.0,
             tick: 0,
-            watching: HashSet::new(),
-            to_watch: Vec::new(),
+            feed: Feed::default(),
             unlisted: HashSet::new(),
             elsewhere: HashMap::new(),
             probing: HashSet::new(),
@@ -444,14 +525,14 @@ impl State {
         if let Err(why) = self.reachable() {
             return self.note(why, None, true);
         }
-        let Some(r) = self.item(id).and_then(|g| g.request.clone()) else { return };
+        let Some(r) = self.item(id).and_then(Gen::rerun_request) else { return };
         self.submit(ImageRequest { seed: random_seed(), ..r });
     }
 
     pub fn submit(&mut self, r: ImageRequest) {
         self.next_local += 1;
         let id = format!("local-{}", self.next_local);
-        self.gens.insert(0, Gen { id: id.clone(), request: Some(r.clone()), queued: None, phase: Phase::Sending, picture: Picture::None, revision: 0 });
+        self.gens.insert(0, Gen::new(id.clone(), Some(r.clone()), Phase::Sending));
         self.select(&id);
         self.pane = Pane::Picture;
         if let Some(net) = &self.net {
@@ -488,8 +569,6 @@ impl State {
         } else {
             let Some(g) = self.item_mut(local) else { return };
             g.id.clone_from(&created.id);
-            g.queued = Some(created.queued);
-            g.revision += 1;
             self.apply(&created, now);
         }
         if was_selected {
@@ -498,18 +577,59 @@ impl State {
         }
     }
 
+    /// What the server says of a generation the studio holds; others are left alone.
     pub fn apply(&mut self, g: &Generation, now: f64) {
         let Some(item) = self.item_mut(&g.id) else { return };
-        let effects = step(&mut item.phase, g, now);
-        item.revision += 1;
+        let effects = item.take(g, now);
         for e in effects {
             self.run(&g.id, e);
         }
+        self.want_preview(&g.id);
+    }
+
+    /// One generation, as the event stream says it: one the studio holds is updated, and a new
+    /// picture joins the gallery where the queue puts it.
+    pub fn upsert(&mut self, g: &Generation, now: f64) {
+        if self.item(&g.id).is_some() {
+            return self.apply(g, now);
+        }
+        let Some(item) = self.newcomer(g, now) else { return };
+        let done = matches!(item.phase, Phase::Done { .. });
+        self.place(item);
+        if done {
+            self.fetch_image(&g.id, false);
+        }
+        self.want_preview(&g.id);
+    }
+
+    /// A generation the studio does not hold yet, as a row, when it is a picture and it is known
+    /// to be one: from the server's `kind`, from what the studio asked for, or once a probe of an
+    /// upstream server has said. An unknown one is probed.
+    fn newcomer(&mut self, g: &Generation, now: f64) -> Option<Gen> {
+        let request = self.requests.get(&g.id).cloned();
+        match (g.kind, &request, self.elsewhere.get(&g.id)) {
+            (Some(Kind::Video), ..) | (None, None, Some(false)) => None,
+            (Some(Kind::Image), ..) | (None, Some(_), _) | (None, None, Some(true)) => Some(Gen::from_server(g, request, now)),
+            (None, None, None) => {
+                if let Some(net) = &self.net
+                    && self.probing.insert(g.id.clone())
+                {
+                    net.probe(g.id.clone());
+                }
+                None
+            }
+        }
+    }
+
+    /// Puts `item` in the gallery in queue order, the most recent first.
+    fn place(&mut self, item: Gen) {
+        let queued = item.queued.unwrap_or(u64::MAX);
+        let at = self.gens.iter().position(|o| !o.is_local() && o.queued.is_some_and(|q| q < queued)).unwrap_or(self.gens.len());
+        self.gens.insert(at, item);
     }
 
     fn run(&mut self, id: &str, effect: Effect) {
         match effect {
-            Effect::Watch => self.watch(id),
             Effect::FetchImage => self.fetch_image(id, true),
         }
     }
@@ -520,33 +640,70 @@ impl State {
         }
     }
 
-    pub fn watch(&mut self, id: &str) {
-        self.want_watch(id);
-        self.watch_next();
+    /// Fetches the latest preview of a picture that is running or was cancelled, one at a time.
+    fn want_preview(&mut self, id: &str) {
+        let Some(net) = &self.net else { return };
+        let Some(g) = self.gens.iter_mut().find(|g| g.id == id) else { return };
+        if !matches!(g.phase, Phase::Running { .. } | Phase::Cancelled { .. }) || g.fetching_preview.is_some() {
+            return;
+        }
+        let Some(step) = g.preview_step.filter(|k| g.live.as_ref().is_none_or(|l| l.step < *k)) else { return };
+        g.fetching_preview = Some(step);
+        net.fetch_preview(id.to_owned(), step);
     }
 
-    fn want_watch(&mut self, id: &str) {
-        if !self.watching.contains(id) && !self.to_watch.iter().any(|w| w == id) {
-            self.to_watch.push(id.to_owned());
+    /// The server has a preview of step `step` of generation `id`.
+    pub fn preview_available(&mut self, id: &str, step: u32) {
+        let Some(g) = self.item_mut(id) else { return };
+        g.preview_step = g.preview_step.max(Some(step));
+        self.want_preview(id);
+    }
+
+    pub fn preview_ready(&mut self, id: &str, step: u32, image: Result<Image, String>) {
+        let Some(g) = self.item_mut(id) else { return };
+        g.fetching_preview = None;
+        // A picture already shown has no use for its preview, and one missed is not worth a note:
+        // the next step brings another.
+        if let (Ok(image), Picture::None | Picture::Loading) = (image, &g.picture)
+            && g.live.as_ref().is_none_or(|l| l.step < step)
+        {
+            g.live = Some(Live { step, image });
+            g.revision += 1;
+        }
+        self.want_preview(id);
+    }
+
+    /// Asks the server to stop a generation that is waiting or running.
+    pub fn stop(&mut self, id: &str) {
+        let Some(g) = self.gens.iter_mut().find(|g| g.id == id) else { return };
+        if !matches!(g.phase, Phase::Queued | Phase::Running { .. }) || g.stopping {
+            return;
+        }
+        g.stopping = true;
+        g.revision += 1;
+        if let Some(net) = &self.net {
+            net.cancel(id.to_owned());
         }
     }
 
-    /// Follows waiting generations while streams are free, those that will move first first:
-    /// the running one, then the one queued longest.
-    fn watch_next(&mut self) {
-        let gens = &self.gens;
-        self.to_watch.retain(|id| gens.iter().any(|g| g.id == *id && g.phase.is_active()));
-        self.to_watch.sort_by_key(|id| {
-            let g = gens.iter().find(|g| g.id == *id);
-            (!g.is_some_and(|g| matches!(g.phase, Phase::Running { .. })), g.and_then(|g| g.queued).unwrap_or(u64::MAX))
-        });
-        let free = MAX_WATCHES.saturating_sub(self.watching.len()).min(self.to_watch.len());
-        for id in self.to_watch.drain(..free) {
-            self.watching.insert(id.clone());
-            if let Some(net) = &self.net {
-                net.watch(id);
+    /// The server's answer to [`State::stop`].
+    pub fn cancelled(&mut self, id: &str, answer: Result<Generation, api::Error>, now: f64) {
+        match answer {
+            Ok(g) => self.apply(&g, now),
+            Err(e) => {
+                if let Some(g) = self.item_mut(id) {
+                    g.stopping = false;
+                    g.revision += 1;
+                }
+                self.note("Couldn't stop the generation.", Some(e.to_string()), true);
             }
         }
+    }
+
+    /// Whether the server can stop a generation: only the fork's can, which is the one with the
+    /// event stream.
+    pub fn can_stop(&self, g: &Gen) -> bool {
+        self.feed == Feed::Streaming && matches!(g.phase, Phase::Queued | Phase::Running { .. }) && !g.stopping
     }
 
     /// Asks for a finished generation's picture: `urgent` for one the user waits for (just
@@ -568,13 +725,8 @@ impl State {
         }
     }
 
-    pub fn watch_ended(&mut self, id: &str) {
-        self.watching.remove(id);
-        self.watch_next();
-    }
-
     /// The server's list, most recent first: keeps what the app already holds for each, adds
-    /// the pictures the studio asked for and drops what the server no longer has. Pictures are
+    /// the pictures among the rest and drops what the server no longer has. Pictures are
     /// fetched for the rows that keep a thumbnail; older ones wait until they are selected.
     pub fn merge(&mut self, list: &[Generation], now: f64) {
         let mut old: Vec<Gen> = std::mem::take(&mut self.gens);
@@ -586,29 +738,18 @@ impl State {
             if old[i].is_local() || self.unlisted.contains(&old[i].id) { gens.push(old.remove(i)) } else { i += 1 }
         }
         let mut effects = Vec::new();
-        let mut probe = Vec::new();
         for g in list {
             let item = match old.iter().position(|o| o.id == g.id) {
                 Some(at) => {
                     let mut item = old.remove(at);
-                    let fx = step(&mut item.phase, g, now);
-                    item.revision += 1;
-                    effects.extend(fx.into_iter().map(|e| (g.id.clone(), e)));
+                    effects.extend(item.take(g, now).into_iter().map(|e| (g.id.clone(), e)));
                     item
                 }
-                None => match (self.requests.get(&g.id), self.elsewhere.get(&g.id)) {
-                    (Some(r), _) => Gen::from_server(g, Some(r.clone()), now),
-                    (None, Some(true)) => Gen::from_server(g, None, now),
-                    (None, Some(false)) => continue,
-                    (None, None) => {
-                        probe.push(g.id.clone());
-                        continue;
-                    }
+                None => match self.newcomer(g, now) {
+                    Some(item) => item,
+                    None => continue,
                 },
             };
-            if item.phase.is_active() {
-                effects.push((g.id.clone(), Effect::Watch));
-            }
             gens.push(item);
         }
         self.gens = gens;
@@ -619,13 +760,6 @@ impl State {
         }
         self.elsewhere.retain(|id, _| listed.contains(id.as_str()));
         self.probing.retain(|id| listed.contains(id.as_str()));
-        if let Some(net) = &self.net {
-            for id in probe {
-                if self.probing.insert(id.clone()) {
-                    net.probe(id);
-                }
-            }
-        }
         let gone: Vec<String> = old.into_iter().map(|o| o.id).collect();
         if let (Some(net), false) = (&self.net, gone.is_empty()) {
             net.forget(&gone);
@@ -638,17 +772,17 @@ impl State {
             self.preview = None;
         }
         for (id, e) in effects {
-            match e {
-                Effect::Watch => self.want_watch(&id),
-                Effect::FetchImage => self.run(&id, e),
-            }
+            self.run(&id, e);
         }
-        self.watch_next();
         if let Some(sel) = self.selected.clone() {
             self.fetch_image(&sel, true);
         }
         for id in backlog {
             self.fetch_image(&id, false);
+        }
+        let previewed: Vec<String> = self.gens.iter().filter(|g| g.preview_step.is_some()).map(|g| g.id.clone()).collect();
+        for id in previewed {
+            self.want_preview(&id);
         }
         self.trim_thumbs();
     }
@@ -672,13 +806,8 @@ impl State {
             return;
         }
         let item = Gen::from_server(&g, None, now);
-        let at = self.gens.iter().position(|o| o.queued.is_some_and(|q| q < g.queued)).unwrap_or(self.gens.len());
-        let active = item.phase.is_active();
         let done = matches!(item.phase, Phase::Done { .. });
-        self.gens.insert(at, item);
-        if active {
-            self.watch(id);
-        }
+        self.place(item);
         if done {
             self.fetch_image(id, false);
         }
@@ -687,6 +816,7 @@ impl State {
     pub fn picture_ready(&mut self, id: &str, file: PathBuf, thumb: Image) {
         let Some(g) = self.item_mut(id) else { return };
         g.picture = Picture::Ready { file, thumb: Some(thumb) };
+        g.live = None;
         g.revision += 1;
         if self.selected.as_deref() == Some(id) {
             self.load_preview();
@@ -761,7 +891,9 @@ impl State {
     pub fn delete(&mut self, id: &str) {
         let Some(g) = self.item(id) else { return };
         if matches!(g.phase, Phase::Running { .. } | Phase::Sending) {
-            return self.note("A running generation can't be deleted.", Some("Wait for it to finish, then delete it.".into()), true);
+            let how =
+                if self.feed == Feed::Streaming { "Stop it, or wait for it to finish, then delete it." } else { "Wait for it to finish, then delete it." };
+            return self.note("A running generation can't be deleted.", Some(how.into()), true);
         }
         if g.is_local() {
             return self.deleted(id);

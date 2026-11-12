@@ -1,0 +1,16 @@
+event: snapshot
+data: {"generations":[{"id":"6af4fadf0001","kind":"video","state":"queued","queued":1790037900,"seconds":null,"step":null,"steps":null,"error":null,"request":{"prompt":"A red panda sips tea","width":null,"height":null,"seed":2,"min_generation_area":null,"attention_precision":null,"attention":null,"references":[]},"created_at":1790037900.1,"started_at":null,"finished_at":null,"timings":null,"preview_step":null},{"id":"6af4fadf0000","kind":"image","state":"running","queued":1790037819,"seconds":null,"step":1,"steps":6,"error":null,"request":{"prompt":"A lighthouse","width":2048,"height":2048,"seed":0,"min_generation_area":4194304,"attention_precision":"fp16","attention":"dense","references":[]},"created_at":1790037819.52,"started_at":1790037819.61,"finished_at":null,"timings":{"load_text":null,"encode":null,"load_dit":null,"steps":[4.22],"decode_read":null,"decode":null,"write":null},"preview_step":1}]}
+
+event: generation
+data: {"id":"6af4fadf0000","kind":"image","state":"running","queued":1790037819,"seconds":null,"step":2,"steps":6,"error":null,"request":{"prompt":"A lighthouse","width":2048,"height":2048,"seed":0,"min_generation_area":4194304,"attention_precision":"fp16","attention":"dense","references":[]},"created_at":1790037819.52,"started_at":1790037819.61,"finished_at":null,"timings":{"load_text":null,"encode":null,"load_dit":null,"steps":[4.22,2.83],"decode_read":null,"decode":null,"write":null},"preview_step":2}
+
+event: preview
+data: {"id":"6af4fadf0000","step":2,"steps":6,"url":"/v1/generations/6af4fadf0000/preview/2"}
+
+: keep-alive
+
+event: something-new
+data: {"ignored":true}
+
+event: generation
+data: {"id":"6af4fadf0000","kind":"image","state":"cancelled","queued":1790037819,"seconds":9.1,"step":null,"steps":null,"error":null,"request":{"prompt":"A lighthouse","width":"wide","height":2048,"seed":0,"min_generation_area":4194304,"attention_precision":"fp16","attention":"dense","references":[]},"created_at":1790037819.52,"started_at":1790037819.61,"finished_at":1790037828.7,"timings":null,"preview_step":2}

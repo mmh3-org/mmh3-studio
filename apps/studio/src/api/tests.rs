@@ -8,6 +8,19 @@ const STATUS_BUSY: &str = include_str!("../../fixtures/status-busy.json");
 const REFUSAL: &str = include_str!("../../fixtures/refusal.json");
 const EVENTS_VIDEO: &str = include_str!("../../fixtures/events-video.txt");
 const EVENTS_IMAGE: &str = include_str!("../../fixtures/events-image.txt");
+const FORK: &str = include_str!("../../fixtures/generation-fork.json");
+const EVENTS_ALL: &str = include_str!("../../fixtures/events-all.txt");
+
+/// The generations a stream of one generation's events says, in order.
+fn generations(stream: &str) -> Vec<Generation> {
+    let mut seen = Vec::new();
+    read_events(stream.as_bytes(), |event| {
+        seen.push(serde_json::from_str(&event.data).unwrap());
+        Ok(())
+    })
+    .unwrap();
+    seen
+}
 
 #[test]
 fn the_documented_answer_to_a_request_reads() {
@@ -15,6 +28,25 @@ fn the_documented_answer_to_a_request_reads() {
     assert_eq!(g.id, "6ab1cf3b0000");
     assert_eq!(g.state, State::Queued);
     assert_eq!((g.seconds, g.step, g.steps, g.error), (None, None, None, None));
+    assert_eq!((g.kind, g.request, g.timings, g.preview_step), (None, None, None, None), "an upstream server says none of the fork's fields");
+}
+
+#[test]
+fn the_fork_says_what_was_asked_for_and_where_the_time_went() {
+    let g: Generation = serde_json::from_str(FORK).unwrap();
+    assert_eq!(g.kind, Some(Kind::Image));
+    let asked = g.request.unwrap();
+    assert_eq!(
+        (asked.prompt.as_deref(), asked.width, asked.height, asked.seed),
+        (Some("<Picture 1> at night, the street lamps lit."), Some(4096), Some(2304), Some(7))
+    );
+    assert_eq!(asked.references, ["picture-1.jpg"]);
+    let t = g.timings.unwrap();
+    assert_eq!(t.steps.len(), 6);
+    assert!((t.load().unwrap() - (1.07 + 7.48 + 0.0004)).abs() < 1e-9);
+    assert_eq!(g.preview_step, Some(6));
+    assert_eq!((g.created_at, g.finished_at), (Some(1_790_037_819.52), Some(1_790_037_835.3)));
+    assert_eq!(Timings::default().load(), None, "nothing timed is no load");
 }
 
 #[test]
@@ -61,15 +93,13 @@ fn status_reads_without_memory_on_a_build_with_no_device() {
 
 #[test]
 fn events_from_the_docs_parse_one_per_step_then_the_end() {
-    let mut seen = Vec::new();
-    read_events(EVENTS_VIDEO.as_bytes(), |g| seen.push((g.state, g.step))).unwrap();
+    let seen: Vec<(State, Option<u32>)> = generations(EVENTS_VIDEO).iter().map(|g| (g.state, g.step)).collect();
     assert_eq!(seen, [(State::Running, Some(3)), (State::Done, None)]);
 }
 
 #[test]
 fn picture_events_start_where_the_generation_is_and_skip_keep_alives() {
-    let mut seen = Vec::new();
-    read_events(EVENTS_IMAGE.as_bytes(), |g| seen.push(g)).unwrap();
+    let seen = generations(EVENTS_IMAGE);
     let states: Vec<(State, Option<u32>)> = seen.iter().map(|g| (g.state, g.step)).collect();
     assert_eq!(states[..2], [(State::Queued, None), (State::Running, None)]);
     assert_eq!(seen.iter().filter_map(|g| g.step).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6]);
@@ -79,21 +109,49 @@ fn picture_events_start_where_the_generation_is_and_skip_keep_alives() {
 
 #[test]
 fn events_with_crlf_line_ends_parse_the_same() {
-    let mut seen = 0;
-    read_events(EVENTS_IMAGE.replace('\n', "\r\n").as_bytes(), |_| seen += 1).unwrap();
-    assert_eq!(seen, 9);
+    assert_eq!(generations(&EVENTS_IMAGE.replace('\n', "\r\n")).len(), 9);
+}
+
+#[test]
+fn the_stream_of_every_generation_says_a_snapshot_then_changes_and_previews() {
+    let mut seen = Vec::new();
+    read_events(EVENTS_ALL.as_bytes(), |event| {
+        seen.extend(Event::parse(&event.name, &event.data)?);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen.len(), 4, "the keep-alive and an unknown event are skipped");
+    let Event::Snapshot(list) = &seen[0] else { panic!("{:?}", seen[0]) };
+    assert_eq!(list.iter().map(|g| g.kind).collect::<Vec<_>>(), [Some(Kind::Video), Some(Kind::Image)]);
+    assert_eq!(list[0].request.as_ref().map(|r| (r.width, r.seed)), Some((None, Some(2))), "a video's own defaults are null");
+    assert!(matches!(&seen[1], Event::Generation(g) if g.step == Some(2) && g.preview_step == Some(2)));
+    assert_eq!(seen[2], Event::Preview(Preview { id: "6af4fadf0000".into(), step: 2, steps: Some(6), url: "/v1/generations/6af4fadf0000/preview/2".into() }));
+    let Event::Generation(cancelled) = &seen[3] else { panic!("{:?}", seen[3]) };
+    assert_eq!(cancelled.state, State::Cancelled);
+    assert!(cancelled.is_finished());
+    assert_eq!(cancelled.request.as_ref().and_then(|r| r.width), None, "a value the server kept as text reads as none");
+}
+
+#[test]
+fn a_missing_route_is_an_upstream_server() {
+    assert!(is_missing_route(&refusal(404, "")));
+    assert!(is_missing_route(&Error::Refused { status: 405, message: String::new() }));
+    assert!(!is_missing_route(&refusal(409, r#"{"error":"that generation has ended"}"#)));
+    assert!(!is_missing_route(&Error::Unreachable("refused".into())));
 }
 
 #[test]
 fn an_event_split_over_data_lines_joins_with_newlines() {
+    let event = |name: &str, data: &str| Some(SseEvent { name: name.into(), data: data.into() });
     let mut p = SseParser::default();
     assert_eq!(p.line("data: {\"a\":"), None);
     assert_eq!(p.line("data:1}"), None);
-    assert_eq!(p.line("event: ignored"), None);
-    assert_eq!(p.line(""), Some("{\"a\":\n1}".to_owned()));
+    assert_eq!(p.line("event: snapshot"), None);
+    assert_eq!(p.line(""), event("snapshot", "{\"a\":\n1}"));
     assert_eq!(p.line(""), None);
+    assert_eq!(p.line(": keep-alive"), None);
     assert_eq!(p.line("data: tail"), None);
-    assert_eq!(p.finish(), Some("tail".to_owned()));
+    assert_eq!(p.finish(), event("message", "tail"), "a name lasts one event");
 }
 
 fn request() -> ImageRequest {

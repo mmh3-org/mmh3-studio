@@ -2,10 +2,12 @@ use std::time::Duration;
 
 use mmh3_studio::mock::{self, Config};
 
-const USAGE: &str = "mock-server [--listen ADDR] [--step SECONDS] [--text SECONDS] [--decode SECONDS]
+const USAGE: &str = "mock-server [--listen ADDR] [--step SECONDS] [--text SECONDS] [--decode SECONDS] [--upstream]
 
 Serves the mmh3 server API for images on ADDR (127.0.0.1:8833 by default): six steps of
---step seconds each, then a painted PNG. A prompt containing [fail] fails after its steps.";
+--step seconds each, each with a preview, then a painted PNG. A prompt containing [fail] fails
+after its steps. --upstream answers as upstream mmh3 does, without the studio fork's event
+stream, previews, cancelling and fields.";
 
 fn main() {
     let mut listen = "127.0.0.1:8833".to_owned();
@@ -19,6 +21,7 @@ fn main() {
             "--step" => config.step = seconds(),
             "--text" => config.text = seconds(),
             "--decode" => config.decode = seconds(),
+            "--upstream" => config.upstream = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;

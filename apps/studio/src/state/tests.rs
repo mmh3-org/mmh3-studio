@@ -9,7 +9,13 @@ fn online() -> State {
 }
 
 fn server(id: &str, state: api::State) -> Generation {
-    Generation { error: None, id: id.into(), queued: 1, seconds: None, state, step: None, steps: None, timings: None }
+    Generation { id: id.into(), queued: 1, state, ..Generation::default() }
+}
+
+/// A picture as the fork's server says it, with what it asked for.
+fn fork(id: &str, state: api::State, prompt: &str) -> Generation {
+    let request = Asked { prompt: Some(prompt.into()), width: Some(1024), height: Some(768), seed: Some(9), ..Asked::default() };
+    Generation { kind: Some(Kind::Image), request: Some(request), ..server(id, state) }
 }
 
 fn running(id: &str, step: u32) -> Generation {
@@ -46,10 +52,14 @@ fn running_keeps_the_time_it_started_and_done_asks_for_the_picture() {
 }
 
 #[test]
-fn an_accepted_submission_starts_watching() {
-    let mut phase = Phase::Sending;
-    let fx: Vec<Effect> = step(&mut phase, &server("a", api::State::Queued), 0.0).into_iter().collect();
-    assert_eq!(fx, [Effect::Watch]);
+fn a_cancelled_generation_keeps_how_far_it_got() {
+    let mut phase = Phase::Running { step: Some(2), steps: 6, since: 0.0 };
+    let cancelled = Generation { preview_step: Some(2), ..server("a", api::State::Cancelled) };
+    assert!(step(&mut phase, &cancelled, 1.0).is_empty(), "a cancelled picture has nothing to fetch");
+    assert_eq!(phase, Phase::Cancelled { step: Some(2) });
+    assert!(!phase.is_active());
+    let _ = step(&mut phase, &server("a", api::State::Cancelled), 1.0);
+    assert_eq!(phase, Phase::Cancelled { step: None }, "cancelled before its first step");
 }
 
 #[test]
@@ -186,28 +196,103 @@ fn a_list_fetched_before_a_submission_lands_after_it_without_dropping_it() {
 }
 
 #[test]
-fn only_a_few_generations_are_followed_at_once_the_running_one_first() {
+fn the_fork_says_which_generations_are_pictures_so_nothing_is_probed() {
     let mut s = online();
-    let at = |id: &str, queued, state| Generation { queued, ..server(id, state) };
-    let mut list: Vec<Generation> = (1..=6).rev().map(|n| at(&format!("q{n}"), 10 + n, api::State::Queued)).collect();
-    list.push(at("r", 5, api::State::Running));
-    s.merge(&list, 0.0);
-    assert_eq!(s.gens.len(), 0, "not the studio's; probed first");
-    for g in &list {
-        s.elsewhere.insert(g.id.clone(), true);
-    }
-    s.merge(&list, 0.0);
-    let mut watching: Vec<&str> = s.watching.iter().map(String::as_str).collect();
-    watching.sort_unstable();
-    assert_eq!(watching, ["q1", "q2", "r"], "the running one, then the ones queued longest");
-    assert_eq!(s.to_watch, ["q3", "q4", "q5", "q6"]);
+    let video = Generation { kind: Some(Kind::Video), ..server("v", api::State::Running) };
+    s.merge(&[video, fork("theirs", api::State::Done, "a lighthouse")], 0.0);
+    let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["theirs"]);
+    assert!(s.probing.is_empty());
+    assert_eq!(crate::gallery::title(&s.gens[0]), "a lighthouse");
+    assert_eq!((s.gens[0].size(), s.gens[0].seed()), (Some((1024, 768)), Some(9)));
+}
 
-    s.merge(&list[1..], 1.0);
-    s.watch_ended("r");
-    let mut watching: Vec<&str> = s.watching.iter().map(String::as_str).collect();
-    watching.sort_unstable();
-    assert_eq!(watching, ["q1", "q2", "q3"], "a free stream goes to the next in line, and a gone one is skipped");
-    assert!(!s.to_watch.contains(&"q6".to_owned()), "q6 left the list");
+#[test]
+fn the_server_s_word_on_what_was_asked_wins_over_the_studio_s_memory() {
+    let mut s = knowing(online(), &["a", "b"]);
+    s.merge(&[fork("a", api::State::Done, "said by the server"), server("b", api::State::Done)], 0.0);
+    assert_eq!(s.item("a").unwrap().prompt(), "said by the server");
+    assert_eq!(s.item("a").unwrap().size(), Some((1024, 768)));
+    assert_eq!(s.item("b").unwrap().prompt(), "a fox", "an upstream server says nothing, so the studio's memory stands");
+    assert_eq!(s.item("b").unwrap().size(), Some((2048, 2048)));
+}
+
+#[test]
+fn a_rerun_sends_what_the_server_says_with_the_studio_s_files_of_its_references() {
+    let mut s = online();
+    let file = PathBuf::from("/tmp/street.jpg");
+    s.requests.insert("a".into(), ImageRequest { references: vec![file.clone()], ..asked("old words") });
+    let mut edit = fork("a", api::State::Done, "<Picture 1> at night");
+    if let Some(r) = &mut edit.request {
+        r.references = vec!["picture-1.jpg".into()];
+    }
+    let mut theirs = fork("b", api::State::Done, "<Picture 1> by day");
+    if let Some(r) = &mut theirs.request {
+        r.references = vec!["picture-1.jpg".into()];
+    }
+    s.merge(&[edit, theirs, fork("c", api::State::Done, "a fox")], 0.0);
+    let again = s.item("a").unwrap().rerun_request().unwrap();
+    assert_eq!((again.prompt.as_str(), again.width, again.references.as_slice()), ("<Picture 1> at night", 1024, &[file][..]));
+    assert_eq!(s.item("b").unwrap().rerun_request(), None, "its pictures are only on the server");
+    assert_eq!(s.item("b").unwrap().reference_count(), 1);
+    assert!(s.item("c").unwrap().rerun_request().is_some(), "a prompt alone is enough");
+}
+
+#[test]
+fn an_event_updates_a_row_or_adds_a_picture_where_the_queue_puts_it() {
+    let mut s = online();
+    let at = |id: &str, queued, state| Generation { queued, ..fork(id, state, id) };
+    s.merge(&[at("new", 30, api::State::Queued), at("old", 10, api::State::Done)], 0.0);
+    s.upsert(&at("mid", 20, api::State::Queued), 1.0);
+    s.upsert(&Generation { kind: Some(Kind::Video), ..server("video", api::State::Queued) }, 1.0);
+    s.upsert(&Generation { step: Some(1), steps: Some(6), ..at("new", 30, api::State::Running) }, 2.0);
+    let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["new", "mid", "old"]);
+    assert_eq!(s.gens[0].phase, Phase::Running { step: Some(1), steps: 6, since: 2.0 });
+}
+
+#[test]
+fn a_preview_shows_until_the_picture_does_and_an_older_one_never_replaces_a_newer() {
+    let mut s = knowing(online(), &["a"]);
+    s.merge(&[Generation { step: Some(2), steps: Some(6), preview_step: Some(2), ..server("a", api::State::Running) }], 0.0);
+    let image = |s: &State| s.images.rgba(1, 1, vec![0, 0, 0, 255]);
+    let two = image(&s);
+    s.preview_ready("a", 2, Ok(two));
+    assert_eq!(s.item("a").unwrap().live.as_ref().map(|l| l.step), Some(2));
+    let one = image(&s);
+    s.preview_ready("a", 1, Ok(one));
+    assert_eq!(s.item("a").unwrap().live.as_ref().map(|l| l.step), Some(2), "a late answer for an older step is dropped");
+    s.preview_ready("a", 3, Err("gone".into()));
+    assert_eq!(s.item("a").unwrap().live.as_ref().map(|l| l.step), Some(2), "a failed fetch keeps the last one");
+    s.preview_available("a", 4);
+    assert_eq!(s.item("a").unwrap().preview_step, Some(4));
+    let thumb = image(&s);
+    s.picture_ready("a", PathBuf::from("/tmp/a.png"), thumb);
+    assert!(s.item("a").unwrap().live.is_none(), "the picture replaces its preview");
+}
+
+#[test]
+fn only_a_server_with_the_event_stream_is_asked_to_stop_one() {
+    let mut s = knowing(online(), &["r", "d"]);
+    s.merge(&[running("r", 2), server("d", api::State::Done)], 0.0);
+    assert!(!s.can_stop(s.item("r").unwrap()), "an upstream server can't");
+    s.feed = Feed::Streaming;
+    assert!(s.can_stop(s.item("r").unwrap()));
+    assert!(!s.can_stop(s.item("d").unwrap()), "a finished one has nothing to stop");
+    s.stop("r");
+    assert!(s.item("r").unwrap().stopping);
+    assert!(!s.can_stop(s.item("r").unwrap()), "asked once is enough");
+    s.cancelled("r", Err(api::Error::Refused { status: 409, message: "that generation has ended".into() }), 1.0);
+    assert!(!s.item("r").unwrap().stopping);
+    assert_eq!(s.notes.last().map(|n| n.title.as_str()), Some("Couldn't stop the generation."));
+    s.stop("r");
+    s.cancelled("r", Ok(running("r", 2)), 1.0);
+    assert!(s.item("r").unwrap().stopping, "still running until its step ends");
+    s.upsert(&Generation { preview_step: Some(3), ..server("r", api::State::Cancelled) }, 2.0);
+    let r = s.item("r").unwrap();
+    assert_eq!((&r.phase, r.stopping), (&Phase::Cancelled { step: Some(3) }, false));
+    s.delete("r");
+    assert_eq!(s.deleting.as_deref(), Some("r"), "a cancelled generation can be deleted");
 }
 
 #[test]
@@ -250,7 +335,7 @@ fn a_picture_asked_for_elsewhere_joins_the_gallery_in_queue_order_and_a_video_ne
     s.merge(&list, 0.0);
     assert_eq!(s.gens.len(), 2);
     s.probing.extend(["theirs".to_owned(), "video".to_owned()]);
-    s.probed("theirs", Probe::Picture(at("theirs", 20)), 1.0);
+    s.probed("theirs", Probe::Picture(Box::new(at("theirs", 20))), 1.0);
     s.probed("video", Probe::NotAPicture, 1.0);
     let ids: Vec<&str> = s.gens.iter().map(|g| g.id.as_str()).collect();
     assert_eq!(ids, ["new", "theirs", "old"]);
@@ -270,7 +355,7 @@ fn an_unanswered_probe_is_asked_again_and_a_stale_one_is_ignored() {
     s.probing.insert("x".into());
     s.probed("x", Probe::Unanswered, 0.0);
     assert!(s.probing.is_empty() && s.elsewhere.is_empty() && s.gens.is_empty());
-    s.probed("y", Probe::Picture(server("y", api::State::Queued)), 0.0);
+    s.probed("y", Probe::Picture(Box::new(server("y", api::State::Queued))), 0.0);
     assert!(s.gens.is_empty(), "an answer nobody waits for is dropped");
 }
 

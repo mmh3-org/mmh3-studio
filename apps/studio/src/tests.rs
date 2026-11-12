@@ -113,6 +113,38 @@ fn running_rows_show_their_step_and_the_preview_its_progress() {
 }
 
 #[test]
+fn an_upstream_server_s_running_picture_has_no_preview_and_no_stop() {
+    let rt = runtime(scenes::running, false);
+    assert!(rt.find("live-preview").is_none());
+    assert!(rt.find("stop").is_none() && rt.find("stop-tool").is_none());
+}
+
+#[test]
+fn a_running_picture_shows_its_latest_preview_and_stops_on_request() {
+    let mut rt = runtime(scenes::previewing, false);
+    assert!(rt.find("live-preview").is_some());
+    assert_eq!(text_of(&rt, "preview-step-text"), "Preview · step 3/6");
+    assert!(rt.find("step-badge").is_some(), "the row's thumbnail says its step");
+    tap(&mut rt, "stop");
+    let g = rt.state.item("7c01aa2e0005").unwrap();
+    assert!(g.stopping);
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(text_of(&rt, "progress-headline"), "Stopping after this step…");
+    assert!(rt.find("stop").is_some(), "the button stays, saying it is stopping");
+}
+
+#[test]
+fn a_cancelled_picture_shows_how_far_it_got() {
+    let rt = runtime(scenes::cancelled, false);
+    assert_eq!(text_of(&rt, "cancelled-headline"), "Cancelled after 4 steps");
+    assert!(rt.find("live-preview").is_some());
+    assert!(rt.find("retry").is_some());
+    assert!(rt.find("stop-tool").is_none());
+}
+
+#[test]
 fn the_gallery_scene_shows_the_preview_stage_and_how_long_it_took() {
     let rt = runtime(scenes::gallery, false);
     assert!(rt.find(stage::KEY).is_some());
