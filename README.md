@@ -17,6 +17,9 @@ nix build github:ryoppippi/mmh3-studio#studio-web     # a static folder to serve
 
 Working in the repository, `direnv allow` loads the dev shell and `just` lists the tasks.
 
+[Benchmarks](docs/benchmarks/README.md) show how long a picture takes on a MacBook Pro M5 Max, from
+the upstream Metal PR to the engine the studio builds, and what each effort level trades.
+
 The model weights are not part of this repository and come under their own licence; check the
 [MiniMax-H3-Image licence](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE),
 including its territorial restrictions, before using them.
