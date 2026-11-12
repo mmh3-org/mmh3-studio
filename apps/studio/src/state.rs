@@ -486,9 +486,11 @@ impl State {
         }
     }
 
-    /// How long pictures take here, fitted from the finished generations, newest first.
+    /// How long pictures take here, fitted from the finished generations, newest first. An edit
+    /// is left out: its references are tokens every step attends to, so its steps cost more than
+    /// a prompt's at the same size and would scale every estimate up.
     pub fn time_model(&self) -> Model {
-        estimate::fit(self.gens.iter().filter_map(|g| match (&g.phase, g.size()) {
+        estimate::fit(self.gens.iter().filter(|g| g.reference_count() == 0).filter_map(|g| match (&g.phase, g.size()) {
             (Phase::Done { seconds, timings }, Some((w, h))) => Some(Sample { mp: sizes::megapixels(w, h), seconds: *seconds, timings: timings.clone() }),
             _ => None,
         }))

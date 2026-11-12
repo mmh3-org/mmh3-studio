@@ -289,6 +289,20 @@ fn a_preview_that_could_not_be_fetched_is_asked_for_again_only_with_the_next_sna
 }
 
 #[test]
+fn an_edit_is_left_out_of_how_long_pictures_take() {
+    let mut s = online();
+    let mp = sizes::megapixels(1024, 768);
+    let warm = estimate::MEASURED.warm(mp);
+    let plain = Generation { seconds: Some(warm), ..fork("plain", api::State::Done, "a fox") };
+    let mut edit = Generation { seconds: Some(warm * 10.0), ..fork("edit", api::State::Done, "<Picture 1> at night") };
+    if let Some(r) = &mut edit.request {
+        r.references = vec!["picture-1.jpg".into()];
+    }
+    s.merge(&[edit, plain], 0.0);
+    assert!((s.time_model().warm(mp) - warm).abs() < 1e-9);
+}
+
+#[test]
 fn only_a_server_with_the_event_stream_is_asked_to_stop_one() {
     let mut s = knowing(online(), &["r", "d"]);
     s.merge(&[running("r", 2), server("d", api::State::Done)], 0.0);
