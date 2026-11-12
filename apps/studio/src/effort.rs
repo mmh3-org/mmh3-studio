@@ -183,7 +183,7 @@ impl Effort {
             }
             (Effort::Low, true, Err(why)) => format!("Sol-Attn from the third step, which may rewrite small lettering; no draft steps, since {why}."),
             (Effort::Low, false, Ok(())) => "Two half-size draft steps: faster, but the same seed gives another composition.".into(),
-            (Effort::Low, false, Err(why)) => format!("Same as High at this size: {why}, and {}.", lower(&short)),
+            (Effort::Low, false, Err(why)) => format!("Same as High at this size: {why}. {short}."),
         }
     }
 }
@@ -199,11 +199,6 @@ pub fn grouped(n: u64) -> String {
         out.push(d);
     }
     out
-}
-
-fn lower(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -232,6 +227,15 @@ mod tests {
         assert_eq!(low(canvas(4736, 3552)), Tuning { attention: Some(Attention::Sol), ..Tuning::default() });
         assert_eq!(canvas(2304, 1728).draft(), Err(NoDraft::Side { width: 2368, height: 1760 }));
         assert_eq!(low(Canvas::new((2048, 2048), None, true)), Tuning::default());
+    }
+
+    #[test]
+    fn low_says_both_reasons_it_is_high_at_a_small_odd_canvas() {
+        assert_eq!(
+            Effort::Low.hint(Some(canvas(2304, 1728))),
+            "Same as High at this size: draft steps need sides in multiples of 64, and this canvas is 2368 × 1760. \
+             Sol-Attn needs 12,288 tokens (32 × 32 pixels each), and this canvas has 4,070."
+        );
     }
 
     #[test]
