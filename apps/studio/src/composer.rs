@@ -190,7 +190,7 @@ fn custom_effort(s: &State, canvas: Canvas, k: &Kit) -> El {
     } else {
         panel = panel.child(note(
             "custom-no-sol",
-            format!("No Sol-Attn: it needs {} tokens, and this canvas has {}.", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens())),
+            format!("No Sol-Attn: it needs {} tokens, and this canvas gives {} of them.", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens())),
             k,
         ));
     }

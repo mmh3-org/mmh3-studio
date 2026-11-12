@@ -32,7 +32,7 @@ impl Effort {
     }
 }
 
-/// The fewest tokens of a canvas Sol-Attn runs sparse on; a token is 32×32 pixels.
+/// The fewest tokens of a sequence, prompt and references included, Sol-Attn runs sparse on.
 pub const SOL_MIN_TOKENS: u64 = 12_288;
 /// Draft steps run on half the canvas, whose sides must still be multiples of 32.
 pub const DRAFT_MULTIPLE: u32 = 2 * MULTIPLE;
@@ -89,11 +89,15 @@ impl Canvas {
         Canvas { width, height, edit }
     }
 
+    /// The tokens of the picture, 32×32 pixels each.
     pub fn tokens(self) -> u64 {
         u64::from(self.width / MULTIPLE) * u64::from(self.height / MULTIPLE)
     }
 
-    /// Whether Sol-Attn makes its full-size steps sparse.
+    /// Whether Sol-Attn surely makes its full-size steps sparse. The server also counts the
+    /// prompt's and the references' tokens, which the studio cannot count, so a canvas a little
+    /// short of the threshold may still run sparse there; it is left dense here so the estimate
+    /// and the effort's label never claim a saving the server might not make.
     pub fn sparse(self) -> bool {
         self.tokens() >= SOL_MIN_TOKENS
     }
@@ -171,7 +175,8 @@ impl Effort {
                 _ => "Pick a valid size to see what this level changes.".into(),
             };
         };
-        let short = format!("Sol-Attn needs {} tokens (32 × 32 pixels each), and this canvas has {}", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens()));
+        let short =
+            format!("Sol-Attn needs {} tokens, and this canvas gives {} of them (32 × 32 pixels each)", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens()));
         match (self, canvas.sparse(), canvas.draft()) {
             (Effort::High, ..) => "The server's defaults: the most faithful picture, and the longest wait.".into(),
             (Effort::Custom, ..) => "Only the options that change anything at this size are shown.".into(),
@@ -234,7 +239,7 @@ mod tests {
         assert_eq!(
             Effort::Low.hint(Some(canvas(2304, 1728))),
             "Same as High at this size: draft steps need sides in multiples of 64, and this canvas is 2368 × 1760. \
-             Sol-Attn needs 12,288 tokens (32 × 32 pixels each), and this canvas has 4,070."
+             Sol-Attn needs 12,288 tokens, and this canvas gives 4,070 of them (32 × 32 pixels each)."
         );
     }
 
