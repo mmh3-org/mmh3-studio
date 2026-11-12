@@ -289,6 +289,17 @@ fn a_preview_that_could_not_be_fetched_is_asked_for_again_only_with_the_next_sna
 }
 
 #[test]
+fn a_generation_another_client_deleted_leaves_the_gallery() {
+    let mut s = knowing(online(), &["a", "b"]);
+    s.merge(&[server("a", api::State::Done), server("b", api::State::Done)], 0.0);
+    s.select("a");
+    s.removed("a");
+    assert_eq!(s.gens.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["b"]);
+    assert_eq!(s.selected, None);
+    assert!(!s.requests.contains_key("a"));
+}
+
+#[test]
 fn an_edit_is_left_out_of_how_long_pictures_take() {
     let mut s = online();
     let mp = sizes::megapixels(1024, 768);

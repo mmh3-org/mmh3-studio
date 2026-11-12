@@ -14,3 +14,7 @@ data: {"ignored":true}
 
 event: generation
 data: {"id":"6af4fadf0000","kind":"image","state":"cancelled","queued":1790037819,"seconds":9.1,"step":null,"steps":null,"error":null,"request":{"prompt":"A lighthouse","width":"wide","height":2048,"seed":0,"min_generation_area":4194304,"attention_precision":"fp16","attention":"dense","references":[]},"created_at":1790037819.52,"started_at":1790037819.61,"finished_at":1790037828.7,"timings":null,"preview_step":2}
+
+event: removed
+data: {"id":"6af4fadf0001"}
+

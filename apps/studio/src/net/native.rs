@@ -370,6 +370,7 @@ fn land(h: &AppHandle<State>, p: &Pictures, event: Event) {
             Event::Snapshot(list) => s.merge(&list, now),
             Event::Generation(g) => s.upsert(&g, now),
             Event::Preview(p) => s.preview_available(&p.id, p.step),
+            Event::Removed(id) => s.removed(&id),
         }
     });
 }

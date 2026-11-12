@@ -165,6 +165,13 @@ pub enum Event {
     /// One generation whose state or step changed.
     Generation(Box<Generation>),
     Preview(Preview),
+    /// The id of a generation taken away, by this studio or another client.
+    Removed(String),
+}
+
+#[derive(Deserialize)]
+struct Removed {
+    id: String,
 }
 
 impl Event {
@@ -175,6 +182,7 @@ impl Event {
             "snapshot" => Event::Snapshot(serde_json::from_str::<Generations>(data).map_err(malformed)?.generations),
             "generation" => Event::Generation(Box::new(serde_json::from_str(data).map_err(malformed)?)),
             "preview" => Event::Preview(serde_json::from_str(data).map_err(malformed)?),
+            "removed" => Event::Removed(serde_json::from_str::<Removed>(data).map_err(malformed)?.id),
             _ => return Ok(None),
         }))
     }

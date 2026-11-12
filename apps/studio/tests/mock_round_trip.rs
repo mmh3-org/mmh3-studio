@@ -256,6 +256,10 @@ fn every_generation_streams_from_one_snapshot_with_a_preview_after_each_step() {
     let small = image::load_from_memory(&png).unwrap();
     assert_eq!((small.width(), small.height()), (40, 32), "an eighth of the canvas");
     assert!(matches!(client.preview(&created.id, 7), Err(Error::Refused { status: 404, ref message }) if message == "no preview of step 7"));
+
+    client.delete(&created.id).unwrap();
+    let removed = until(&rx, |e| matches!(e, Event::Removed(_)));
+    assert_eq!(removed.last(), Some(&Event::Removed(created.id.clone())), "a delete is said too");
 }
 
 #[test]

@@ -120,7 +120,7 @@ fn the_stream_of_every_generation_says_a_snapshot_then_changes_and_previews() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(seen.len(), 4, "the keep-alive and an unknown event are skipped");
+    assert_eq!(seen.len(), 5, "the keep-alive and an unknown event are skipped");
     let Event::Snapshot(list) = &seen[0] else { panic!("{:?}", seen[0]) };
     assert_eq!(list.iter().map(|g| g.kind).collect::<Vec<_>>(), [Some(Kind::Video), Some(Kind::Image)]);
     assert_eq!(list[0].request.as_ref().map(|r| (r.width, r.seed)), Some((None, Some(2))), "a video's own defaults are null");
@@ -130,6 +130,7 @@ fn the_stream_of_every_generation_says_a_snapshot_then_changes_and_previews() {
     assert_eq!(cancelled.state, State::Cancelled);
     assert!(cancelled.is_finished());
     assert_eq!(cancelled.request.as_ref().and_then(|r| r.width), None, "a value the server kept as text reads as none");
+    assert_eq!(seen[4], Event::Removed("6af4fadf0001".into()));
 }
 
 #[test]

@@ -43,7 +43,7 @@ const THUMB_PATH: &str = "studio-thumbs/";
 /// canvas, so only a canvas past 8192 is scaled down.
 const PREVIEW_SIDE: u32 = 1024;
 /// The events of `GET /v1/events` the studio follows.
-const FEED_EVENTS: [&str; 3] = ["snapshot", "generation", "preview"];
+const FEED_EVENTS: [&str; 4] = ["snapshot", "generation", "preview", "removed"];
 
 pub struct Net {
     inner: Rc<Inner>,
@@ -501,6 +501,7 @@ fn land(inner: &Rc<Inner>, event: Event) {
             Event::Snapshot(list) => s.merge(&list, now),
             Event::Generation(g) => s.upsert(&g, now),
             Event::Preview(p) => s.preview_available(&p.id, p.step),
+            Event::Removed(id) => s.removed(&id),
         }
     });
 }

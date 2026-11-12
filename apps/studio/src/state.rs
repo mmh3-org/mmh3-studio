@@ -899,6 +899,14 @@ impl State {
         };
     }
 
+    /// The server took a generation away, as asked by this studio or by another client.
+    pub fn removed(&mut self, id: &str) {
+        if let Some(net) = &self.net {
+            net.forget(&[id.to_owned()]);
+        }
+        self.deleted(id);
+    }
+
     pub fn deleted(&mut self, id: &str) {
         self.gens.retain(|g| g.id != id);
         self.unlisted.remove(id);

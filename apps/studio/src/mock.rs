@@ -637,6 +637,7 @@ fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
                 Some(i) => {
                     jobs.list.remove(i);
                     jobs.waiting.retain(|w| w != id);
+                    jobs.announce("removed", serde_json::json!({ "id": id }).to_string());
                     drop(jobs);
                     shared.changed.notify_all();
                     respond(&mut stream, 204, &[], b"")
