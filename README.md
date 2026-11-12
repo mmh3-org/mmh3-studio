@@ -16,18 +16,18 @@ A native and web studio for generating pictures with
   <img alt="A red fox asleep in the snow among birch trees" src="docs/screenshots/fox.webp" width="24%">
 </p>
 
-Pictures from the studio at 2048×2048 and Effort High, 19–22 s each on a MacBook Pro M5 Max.
+Pictures from the studio at 2048×2048 and Effort High, 19–22 s each through the resident server on
+the 14-inch M5 Max, in the conditions under [Speed](#speed).
 
 ## What it is
 
-`mmh3 server` keeps the text encoder, DiT and VAE loaded between generations, so a picture never
-pays a cold start. The studio is its client: it asks for pictures, follows them as they run and
+`mmh3 server` keeps the text encoder, DiT and VAE loaded between generations, so no picture after
+the first pays a cold start. The studio is its client: it asks for pictures, follows them as they run and
 keeps the ones you made. It never loads a model itself.
 
 - **Native:** a macOS app built with [Rune](https://github.com/anomalyco/rune), drawn on the GPU.
-- **Web:** the same app in a browser through Rune's WebGPU target. The server listens only on
-  loopback and has no authentication, so to use the studio from a phone or another computer, put
-  it on your tailnet with [Tailscale Serve](https://tailscale.com/kb/1312/serve).
+- **Web:** the same app in a browser through Rune's WebGPU target, which also reaches a phone or
+  another computer on your tailnet through [Tailscale Serve](https://tailscale.com/kb/1312/serve).
 
 ## Features
 
@@ -36,24 +36,20 @@ keeps the ones you made. It never loads a model itself.
 - **Live updates:** every generation arrives through `GET /v1/events` as it happens. Against a
   server without that route, the studio reads the list every two seconds instead.
 - **History:** the gallery lists every picture on the server, newest first, with its prompt, size,
-  seed, effort and time. The server keeps each generation in a directory of its own, holding
-  `image.png`, `metadata.json` (the request, the timings, the models and the machine) and
-  `previews/`, and lists them again after a restart.
+  seed, effort and time. The server keeps each generation in a directory of its own under
+  `$XDG_CACHE_HOME/mmh3/jobs`, or `~/.cache/mmh3/jobs` when that is unset (`--jobs DIR` changes
+  it), holding `image.png`, `metadata.json` and `previews/`, and lists them again after a restart.
 - **Actions:** save the PNG, reveal it in Finder, copy the prompt or the seed, re-run with a new
   seed, edit the picture, or delete it. Click the time to see where it went, stage by stage.
-- **Size:** a quality, Draft (about 4 MP) or Final (about 16 MP), times an aspect ratio from 21:9
-  to 9:16, or a custom size. Each choice shows how long it should take, fitted to the latest
-  generations on this machine.
+- **Size:** a quality and an aspect ratio, or a custom size, each showing how long it should take
+  on this machine.
 - **Effort:** High leaves the server's defaults for the most faithful picture. Medium runs Sol-Attn
-  sparse attention from the third step, which can rewrite small lettering and only helps on a
-  canvas of about 12.6 MP or more. Low adds two draft steps at half size, which change the
-  composition. Custom sets each option on its own.
-- **Edits:** drop up to 16 PNG or JPEG pictures on the composer and refer to them in the prompt as
-  `<Picture 1>`, `<Picture 2>` and so on, or edit a finished picture.
-- **Power banner:** says why a picture is slow when the Mac is not in High Power Mode, is on
-  battery, is hot, or another process keeps the CPU busy, and copies the `pmset` command that turns
-  High Power Mode on. On a 14-inch MacBook Pro with an M5 Max, the case's power and cooling limit
-  the GPU whatever the adapter.
+  sparse attention on a large canvas. Low adds two draft steps at half size, which change the
+  composition, and Sol-Attn where Medium would use it. Custom sets each option on its own.
+- **Edits:** attach pictures to the composer and refer to them in the prompt, or edit a finished
+  picture.
+- **Power banner:** says why a picture is slow, such as Energy Mode, battery, heat or a busy
+  process, and how to turn High Power Mode on.
 
 The [studio's README](apps/studio/README.md) describes each of these in full, and what changes in a
 browser.
@@ -83,13 +79,14 @@ gives, and how the engine compares with the upstream Metal PR.
 - An Apple silicon Mac. mmh3 runs the DiT on the GPU's matrix units, the Neural Accelerators of an
   M5 or later, so a picture is fast only on those chips.
 - macOS 26 or later, which the engine needs for the matrix units and for edits.
-- About 50 GB of disk for the models, and memory to keep them resident: the server holds the text
-  encoder, DiT and VAE at once.
+- About 50 GB of disk for the models, and about 50 GB of memory to keep them resident: the server
+  holds the text encoder, DiT and VAE at once.
 - [Nix](https://nixos.org) with flakes, and Xcode, which builds mmh3's Metal and Swift parts.
 
 ### Models
 
-The server reads three files from Hugging Face, laid out as ComfyUI does:
+The server reads three files from Hugging Face, laid out as ComfyUI does. Fetch them with the
+Hugging Face CLI (`uvx --from huggingface_hub hf` runs it without installing):
 
 | File | Repository | Size |
 | --- | --- | --- |
@@ -105,7 +102,8 @@ hf download Comfy-Org/MiniMax-H3-Image \
   vae/minimax_h3_image_vae_fp16.safetensors --local-dir models
 ```
 
-The engine's `tools/download-models.sh --image` fetches the same files, along with the video models.
+The engine's `tools/download-models.sh --image` fetches the same files, along with the video models,
+and falls back to `curl` without `hf`.
 
 ### Run
 
@@ -121,10 +119,12 @@ The first picture loads the models; every later one starts at its first step.
 
 ### In a browser
 
-From a checkout, build the web studio and serve it beside the server's `/v1` routes on one origin,
-then open http://localhost:8000:
+From a checkout, in the dev shell (`direnv allow`, see [Development](#development)), start the
+server, build the web studio and serve it beside the server's `/v1` routes on one origin, then open
+http://localhost:8000:
 
 ```sh
+just server
 just studio::web-build
 just studio::web-serve       # target/web on 127.0.0.1:8000, /v1 to 127.0.0.1:8833
 ```
@@ -133,7 +133,7 @@ To reach it from your phone, put it on your tailnet's HTTPS name. Don't use `tai
 server has no authentication.
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:8000
+tailscale serve --bg 8000
 tailscale serve status       # prints the https://<machine>.<tailnet>.ts.net/ address
 ```
 
@@ -149,8 +149,8 @@ tailscale serve status       # prints the https://<machine>.<tailnet>.ts.net/ ad
 | `just studio::run-mock` | Runs the studio against a mock server, without the engine or the GPU. |
 | `just studio::web-dev` | Rebuilds the web studio on every change. |
 | `just studio::test` | Runs the client, mock, state machine and UI tests. |
-| `just studio::screenshots` | Renders the UI's scenes headless into `apps/studio/screenshots/`. |
-| `just check` | Runs every flake check: formatting, typos, clippy and the tests. |
+| `just studio::screenshots` | Renders the headless scenes and a live mock run into `apps/studio/screenshots/`. |
+| `just check` | Runs every flake check: formatting, typos, clippy, the tests and the web build. |
 
 The repository:
 
