@@ -17,9 +17,10 @@ pub struct Model {
     pub load: f64,
 }
 
-/// A 14-inch M5 Max: 2048² at ≈ 4.4 s a step and 1.4 s to decode, 30 s in all; 4096² at
-/// ≈ 32 s a step and 5 s to decode, 3.5 min in all; 6 s to load the models cold.
-pub const MEASURED: Model = Model { fixed: 3.0, step: [0.754, 0.0705], decode: [0.2, 0.286], load: 6.0 };
+/// A 14-inch M5 Max in High Power Mode on AC: 2048² at ≈ 3.9 s a step and 1.4 s to decode,
+/// 28 s in all; 4096² at ≈ 24 s a step and 5 s to decode, 2.5 min in all; 6 s to load the
+/// models cold.
+pub const MEASURED: Model = Model { fixed: 3.0, step: [0.7735, 0.03916], decode: [0.2, 0.286], load: 6.0 };
 
 /// How many of the latest finished generations the fit looks at, so it follows a Mac whose
 /// power settings change.
@@ -128,12 +129,13 @@ mod tests {
     fn the_defaults_match_the_measurements() {
         let draft = mp(2048, 2048);
         let full = mp(4096, 4096);
-        assert!((MEASURED.step_at(draft) - 4.4).abs() < 0.1, "{}", MEASURED.step_at(draft));
-        assert!((30.0..35.0).contains(&MEASURED.step_at(full)), "{}", MEASURED.step_at(full));
+        assert!((MEASURED.step_at(full) - 24.0).abs() < 0.1, "{}", MEASURED.step_at(full));
         assert!((MEASURED.decode_at(draft) - 1.4).abs() < 0.1);
         assert!((MEASURED.decode_at(full) - 5.0).abs() < 0.2);
+        assert!((MEASURED.warm(draft) - 28.0).abs() < 0.1, "{}", MEASURED.warm(draft));
+        assert!((150.0..165.0).contains(&MEASURED.warm(full)), "{}", MEASURED.warm(full));
         assert_eq!(approx(MEASURED.warm(draft)), "30 s");
-        assert_eq!(approx(MEASURED.warm(full)), "3.5 min");
+        assert_eq!(approx(MEASURED.warm(full)), "2.5 min");
         assert_eq!(approx(MEASURED.seconds(draft, true)), "35 s");
     }
 
