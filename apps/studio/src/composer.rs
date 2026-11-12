@@ -36,7 +36,7 @@ fn option(key: String, label: String, on: bool, k: &Kit, content: El, pick: impl
 
 /// What a size is, and how long it should take here: "2048 × 2048 · 4.2 MP · ≈ 30 s".
 fn estimate(s: &State, model: &Model, (w, h): (u32, u32)) -> String {
-    let seconds = model.seconds(megapixels(w, h), s.cold());
+    let seconds = model.seconds(s.run_for((w, h)), s.cold());
     let slower = if s.gpu_held_back() { " · may be slower" } else { "" };
     format!("{w} × {h} · {:.1} MP · ≈ {}{slower}", megapixels(w, h), approx(seconds))
 }
@@ -46,8 +46,7 @@ fn quality(s: &State, model: &Model, k: &Kit) -> El {
     let mut group = row().key("quality").role("radiogroup").focus_group().label("Quality").w_full().equal_columns(2).gaps(8.0, 8.0);
     for (i, q) in Quality::ALL.into_iter().enumerate() {
         let pick = SizeChoice { quality: q, ..s.size };
-        let (w, h) = pick.size();
-        let time = format!("≈ {}", approx(model.seconds(megapixels(w, h), s.cold())));
+        let time = format!("≈ {}", approx(model.seconds(s.run_for(pick.size()), s.cold())));
         let on = !s.custom_size && s.size.quality == q;
         let content = col()
             .px(10.0)

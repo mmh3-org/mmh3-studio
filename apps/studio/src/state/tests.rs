@@ -315,15 +315,27 @@ fn a_generation_another_client_deleted_leaves_the_gallery() {
 #[test]
 fn an_edit_is_left_out_of_how_long_pictures_take() {
     let mut s = online();
-    let mp = sizes::megapixels(1024, 768);
-    let warm = estimate::MEASURED.warm(mp);
+    let run = Canvas::new((1024, 768), None, false).run(&Tuning::default());
+    let warm = estimate::MEASURED.warm(run);
     let plain = Generation { seconds: Some(warm), ..fork("plain", api::State::Done, "a fox") };
     let mut edit = Generation { seconds: Some(warm * 10.0), ..fork("edit", api::State::Done, "<Picture 1> at night") };
     if let Some(r) = &mut edit.request {
         r.references = vec!["picture-1.jpg".into()];
     }
     s.merge(&[edit, plain], 0.0);
-    assert!((s.time_model().warm(mp) - warm).abs() < 1e-9);
+    assert!((s.time_model().warm(run) - warm).abs() < 1e-9);
+}
+
+#[test]
+fn a_fast_effort_is_fitted_against_its_own_run() {
+    let mut s = online();
+    let sol = Tuning { attention: Some(Attention::Sol), draft_steps: Some(2), ..Tuning::default() };
+    s.requests.insert("low".into(), ImageRequest { width: 4096, height: 4096, tuning: sol, ..asked("a fox") });
+    let low = Canvas::new((4096, 4096), None, false).run(&sol);
+    assert_eq!((low.draft, low.sparse), (2, 4));
+    s.merge(&[Generation { seconds: Some(estimate::MEASURED.warm(low)), ..server("low", api::State::Done) }], 0.0);
+    let dense = Run::dense(low.mp);
+    assert!((s.time_model().warm(dense) - estimate::MEASURED.warm(dense)).abs() < 1e-9, "a Low picture does not make High look faster");
 }
 
 #[test]

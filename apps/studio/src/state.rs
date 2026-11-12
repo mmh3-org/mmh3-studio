@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{self, Asked, Attention, Generation, ImageRequest, Kind, Status, Timings, Tuning};
-use crate::estimate::{self, Model, Sample};
+use crate::effort::Canvas;
+use crate::estimate::{self, Model, Run, Sample};
 use crate::power::{Issue, Power};
 use crate::sizes::{self, ASPECTS, Quality, SizeError};
 use crate::stage::Zoom;
@@ -243,6 +244,12 @@ impl Gen {
             tuning: self.tuning(),
             references,
         })
+    }
+
+    /// How its steps run, once its size is known.
+    pub fn run(&self) -> Option<Run> {
+        let min_area = self.asked.as_ref().and_then(|a| a.min_generation_area).or(self.request.as_ref().and_then(|r| r.min_generation_area));
+        Some(Canvas::new(self.size()?, min_area, self.has_references()).run(&self.tuning()))
     }
 
     /// The options that traded its quality for time: as the server says it ran them where it
@@ -519,10 +526,15 @@ impl State {
     /// is left out: its references are tokens every step attends to, so its steps cost more than
     /// a prompt's at the same size and would scale every estimate up.
     pub fn time_model(&self) -> Model {
-        estimate::fit(self.gens.iter().filter(|g| g.reference_count() == 0).filter_map(|g| match (&g.phase, g.size()) {
-            (Phase::Done { seconds, timings }, Some((w, h))) => Some(Sample { mp: sizes::megapixels(w, h), seconds: *seconds, timings: timings.clone() }),
+        estimate::fit(self.gens.iter().filter(|g| g.reference_count() == 0).filter_map(|g| match (&g.phase, g.run()) {
+            (Phase::Done { seconds, timings }, Some(run)) => Some(Sample { run, seconds: *seconds, timings: timings.clone() }),
             _ => None,
         }))
+    }
+
+    /// How the composer's picture would run at `size`.
+    pub fn run_for(&self, size: (u32, u32)) -> Run {
+        Canvas::new(size, None, !self.references.is_empty()).run(&Tuning::default())
     }
 
     /// The server answers but holds no `dit` model, so the next generation loads it first.

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::{Attention, IMAGE_STEPS, Precision, Tuning};
+use crate::estimate::Run;
 use crate::sizes::{self, MULTIPLE};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,16 @@ impl Canvas {
             return Err(NoDraft::Side { width: self.width, height: self.height });
         }
         Ok(())
+    }
+
+    /// How its six steps run with `tuning`.
+    pub fn run(self, tuning: &Tuning) -> Run {
+        let draft = tuning.draft_steps.unwrap_or(0).min(IMAGE_STEPS - 1);
+        let sparse = match tuning.attention {
+            Some(Attention::Sol) if self.sparse() => IMAGE_STEPS - draft.max(start_step(tuning.sparse_start.unwrap_or(SOL_START)) - 1).min(IMAGE_STEPS),
+            _ => 0,
+        };
+        Run { mp: sizes::megapixels(self.width, self.height), draft, sparse }
     }
 }
 
@@ -238,5 +249,18 @@ mod tests {
             assert_eq!(first + 1, step);
         }
         assert_eq!(start_fraction(4), 0.5);
+    }
+
+    #[test]
+    fn a_run_counts_the_draft_and_sparse_steps() {
+        let sol = Tuning { attention: Some(Attention::Sol), ..Tuning::default() };
+        let full = canvas(4096, 4096);
+        assert_eq!((full.run(&sol).draft, full.run(&sol).sparse), (0, 4));
+        assert_eq!(canvas(2048, 2048).run(&sol).sparse, 0);
+        let low = Tuning { draft_steps: Some(2), ..sol };
+        assert_eq!((full.run(&low).draft, full.run(&low).sparse), (2, 4));
+        assert_eq!(full.run(&Tuning { sparse_start: Some(0.5), ..sol }).sparse, 3);
+        assert_eq!(full.run(&Tuning { draft_steps: Some(4), sparse_start: Some(0.5), ..sol }).sparse, 2);
+        assert_eq!(canvas(1024, 1024).run(&Tuning::default()).mp, sizes::megapixels(2048, 2048), "a small picture runs on the minimum area");
     }
 }

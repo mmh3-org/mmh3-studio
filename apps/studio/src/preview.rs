@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use crate::api::Timings;
+use crate::estimate::Run;
 use crate::sizes::megapixels;
 use rune::{Color, Cx, El, SurfaceFit, col, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, Popover, Progress, Spinner};
@@ -511,11 +512,12 @@ fn timing(s: &State, g: &Gen, total: f64, timings: Option<&Timings>, k: &Kit) ->
         (parts, None)
     } else {
         let model = s.time_model();
-        let mp = g.size().map_or(0.0, |(w, h)| megapixels(w, h));
-        let scale = total / model.warm(mp).max(f64::EPSILON);
+        let run = g.run().unwrap_or(Run::dense(0.0));
+        let scale = total / model.warm(run).max(f64::EPSILON);
+        let steps = model.steps(run) * scale;
         let parts = vec![
-            part(format!("{} steps, ≈ {:.1} s each", crate::api::IMAGE_STEPS, model.step_at(mp) * scale), model.steps_at(mp) * scale, c.icon_accent),
-            part("Decoding".into(), model.decode_at(mp) * scale, c.icon_muted),
+            part(format!("{} steps, ≈ {:.1} s each", crate::api::IMAGE_STEPS, steps / f64::from(crate::api::IMAGE_STEPS)), steps, c.icon_accent),
+            part("Decoding".into(), model.decode_at(run.mp) * scale, c.icon_muted),
             part("Everything else".into(), model.fixed * scale, c.border_base),
         ];
         (parts, Some("The server reports only the total, so this splits it as the studio's estimate does."))
