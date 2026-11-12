@@ -348,8 +348,8 @@ pub struct State {
     pub references: Vec<Reference>,
     /// Files are being dragged over the composer.
     pub dropping: bool,
-    /// The window's width in points, once laid out; below [`crate::view::COMPACT_BELOW`] the
-    /// panes take turns.
+    /// The window's width in points, once laid out; below [`crate::view::COMPACT_BELOW`], or
+    /// with too little room for the picture beside the open panes, the panes take turns.
     pub width: f32,
     pub pane: Pane,
     pub preview: Option<(String, Image)>,

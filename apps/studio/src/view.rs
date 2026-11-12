@@ -16,9 +16,13 @@ pub fn kit(dark: bool) -> &'static Kit {
 /// Below this width the gallery, the picture and the composer take turns filling the window:
 /// a phone, or a narrow browser window.
 pub const COMPACT_BELOW: f32 = 720.0;
+/// The narrowest the picture pane may be beside the open gallery and composer: its toolbar's
+/// actions, Stop among them, and its zoom on one row. Narrower, the panes take turns too.
+pub const PICTURE_MIN: f32 = 400.0;
 
 pub fn is_compact(s: &State) -> bool {
-    s.width > 0.0 && s.width < COMPACT_BELOW
+    let picture = s.width - s.sidebar.shown_width() - s.inspector.shown_width();
+    s.width > 0.0 && (s.width < COMPACT_BELOW || picture < PICTURE_MIN)
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {

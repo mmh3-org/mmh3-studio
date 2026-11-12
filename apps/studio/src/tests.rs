@@ -311,6 +311,29 @@ fn placeholder_cards_stay_inside_their_frame_at_the_smallest_window() {
     }
 }
 
+#[test]
+fn the_picture_toolbar_fits_its_pane_at_every_window_width() {
+    for width in [720.0, 760.0, 900.0, 1000.0, 1040.0, 1320.0] {
+        let mut s = State::offline();
+        scenes::timing(&mut s);
+        let mut rt = Runtime::new(s, view::view, (width, 640.0), Env { system_dark: false, scale: 1.0 });
+        rt.poll = Some(poll);
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        let rect = |key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect);
+        let bar = rect("picture-bar").unwrap_or_else(|| panic!("{width}: no picture bar"));
+        for key in ["picture-actions", "zoom-controls", "delete", "zoom-fit"] {
+            let r = rect(key).unwrap_or_else(|| panic!("{width}: no {key}"));
+            assert!(r[0] >= bar[0] && r[0] + r[2] <= bar[0] + bar[2], "{width}: {key} {r:?} spills out of the bar {bar:?}");
+        }
+        let actions = rect("picture-actions").unwrap();
+        let zoom = rect("zoom-controls").unwrap();
+        assert_eq!(actions[1], zoom[1], "{width}: the actions and the zoom share a row, so no divider is left hanging");
+        assert_eq!(rt.find("pane-picker").is_some(), width < 1040.0, "{width}");
+    }
+}
+
 fn picture_files(n: usize) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
     let dir = std::env::temp_dir().join(format!("mmh3-studio-drop-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
