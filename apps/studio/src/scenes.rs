@@ -59,7 +59,7 @@ fn remote(id: &str, state: Remote) -> Generation {
 
 /// What the studio remembers asking for `id`, which the server never repeats.
 fn asked(s: &mut State, id: &str, prompt: &str, seed: u64, (width, height): (u32, u32)) {
-    let r = ImageRequest { prompt: prompt.into(), seed, width, height, min_generation_area: None, references: Vec::new() };
+    let r = ImageRequest { prompt: prompt.into(), seed, width, height, min_generation_area: None, references: Vec::new(), ..ImageRequest::default() };
     s.requests.insert(id.into(), r);
 }
 

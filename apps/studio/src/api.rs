@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::effort::Effort;
+
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8833";
 /// The picture model is distilled to six steps, which a request cannot change.
 pub const IMAGE_STEPS: u32 = 6;
@@ -79,7 +81,7 @@ pub struct Generation {
 /// What a generation asked for, as the fork's server says it: a picture's defaults where the
 /// request left an option out, and the names its references were uploaded under. A value the
 /// server could not read as a number stays as it was sent, which reads here as none.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Asked {
     #[serde(default)]
     pub prompt: Option<String>,
@@ -95,12 +97,39 @@ pub struct Asked {
     pub attention_precision: Option<String>,
     #[serde(default)]
     pub attention: Option<String>,
+    /// Sol-Attn's threshold and start, and the draft steps, which a server may also say.
+    #[serde(default, deserialize_with = "decimal")]
+    pub sparse_tau: Option<f64>,
+    #[serde(default, deserialize_with = "decimal")]
+    pub sparse_start: Option<f64>,
+    #[serde(default, deserialize_with = "number")]
+    pub draft_steps: Option<u32>,
     #[serde(default)]
     pub references: Vec<String>,
 }
 
+impl Asked {
+    /// What the server says was asked for of the options in [`Tuning`], each `None` where it
+    /// says nothing or says the default.
+    pub fn tuning(&self) -> Tuning {
+        Tuning {
+            attention: self.attention.as_deref().and_then(Attention::parse).filter(|a| *a != Attention::Dense),
+            sparse_tau: self.sparse_tau,
+            sparse_start: self.sparse_start,
+            draft_steps: self.draft_steps.filter(|n| *n > 0),
+            attention_precision: self.attention_precision.as_deref().and_then(Precision::parse).filter(|p| *p != Precision::Fp16),
+        }
+    }
+}
+
 fn number<'de, D: serde::Deserializer<'de>, T: TryFrom<u64>>(d: D) -> Result<Option<T>, D::Error> {
     Ok(serde_json::Value::deserialize(d)?.as_u64().and_then(|n| T::try_from(n).ok()))
+}
+
+/// A number the server may write as one or as the text it was sent as.
+fn decimal<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).filter(|x: &f64| x.is_finite()))
 }
 
 fn list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
@@ -214,9 +243,98 @@ pub struct Status {
     pub queued: u32,
 }
 
+/// Which attention a picture's full-size steps run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Attention {
+    Dense,
+    /// Sol-Attn, a block-sparse attention that leaves out what matters least.
+    Sol,
+}
+
+impl Attention {
+    pub fn field(self) -> &'static str {
+        match self {
+            Attention::Dense => "dense",
+            Attention::Sol => "sol",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Attention> {
+        [Attention::Dense, Attention::Sol].into_iter().find(|a| a.field() == text)
+    }
+}
+
+/// The attention precision of a server on Metal, the only ones the studio offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Precision {
+    Fp16,
+    /// FP16, with the scores from INT8 queries and keys.
+    Int8Fp16,
+}
+
+impl Precision {
+    pub fn field(self) -> &'static str {
+        match self {
+            Precision::Fp16 => "fp16",
+            Precision::Int8Fp16 => "int8-fp16",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Precision> {
+        [Precision::Fp16, Precision::Int8Fp16].into_iter().find(|p| p.field() == text)
+    }
+}
+
+/// The options of a picture that trade its quality for time. Each is `None` where the request
+/// leaves the server's default, so a request that changes nothing sends none of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tuning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Attention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_tau: Option<f64>,
+    /// The fraction of the schedule where Sol-Attn starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_start: Option<f64>,
+    /// How many of the first steps run on a canvas of half the width and height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_precision: Option<Precision>,
+}
+
+impl Tuning {
+    pub fn is_empty(&self) -> bool {
+        *self == Tuning::default()
+    }
+
+    /// The form fields, in the order they are sent.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = Vec::new();
+        if let Some(a) = self.attention {
+            fields.push(("attention", a.field().to_owned()));
+        }
+        if let Some(tau) = self.sparse_tau {
+            fields.push(("sparse-tau", tau.to_string()));
+        }
+        if let Some(start) = self.sparse_start {
+            fields.push(("sparse-start", start.to_string()));
+        }
+        if let Some(n) = self.draft_steps {
+            fields.push(("draft-steps", n.to_string()));
+        }
+        if let Some(p) = self.attention_precision {
+            fields.push(("attention-precision", p.field().to_owned()));
+        }
+        fields
+    }
+}
+
 /// What the studio asks `POST /v1/images` for. It is also what the studio remembers of a
 /// generation, since the server hands none of it back.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ImageRequest {
     pub prompt: String,
     pub seed: u64,
@@ -224,6 +342,13 @@ pub struct ImageRequest {
     pub height: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_generation_area: Option<u64>,
+    /// The effort the composer was set to, which only the studio knows; `None` for a request
+    /// remembered before there was one, or run again from what a server said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// What that effort sent.
+    #[serde(default, skip_serializing_if = "Tuning::is_empty")]
+    pub tuning: Tuning,
     /// Pictures to edit, `<Picture 1>` first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<PathBuf>,
@@ -244,6 +369,7 @@ impl ImageRequest {
         if let Some(area) = self.min_generation_area {
             fields.push(("min-generation-area", area.to_string()));
         }
+        fields.extend(self.tuning.fields());
         fields
     }
 

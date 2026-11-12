@@ -97,6 +97,18 @@ pub fn megapixels(width: u32, height: u32) -> f64 {
     f64::from(width) * f64::from(height) / 1_000_000.0
 }
 
+/// The area mmh3 generates a smaller picture at unless the request says otherwise, 2048×2048.
+pub const DEFAULT_MIN_AREA: u64 = 2048 * 2048;
+
+/// The canvas mmh3 generates a picture of `width`×`height` on: the same shape scaled up to
+/// `min_area` when it is smaller, each side rounded to a multiple of 32, as `canvas_size` of
+/// mmh3's `src/image.rs` does.
+pub fn canvas(width: u32, height: u32, min_area: u64) -> (u32, u32) {
+    let scale = (min_area as f64 / (f64::from(width) * f64::from(height))).sqrt().max(1.0);
+    let round = |side: u32| (f64::from(side) * scale / f64::from(MULTIPLE)).round_ties_even().max(1.0) as u32 * MULTIPLE;
+    (round(width), round(height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +132,15 @@ mod tests {
         assert_eq!(custom("", "768"), Err(SizeError::NotANumber));
         assert_eq!(custom("128", "768"), Err(SizeError::OutOfRange));
         assert_eq!(custom("8224", "768"), Err(SizeError::OutOfRange));
+    }
+
+    #[test]
+    fn a_small_picture_is_generated_on_a_canvas_of_the_minimum_area() {
+        assert_eq!(canvas(2048, 2048, DEFAULT_MIN_AREA), (2048, 2048));
+        assert_eq!(canvas(4096, 4096, DEFAULT_MIN_AREA), (4096, 4096));
+        assert_eq!(canvas(2304, 1728, DEFAULT_MIN_AREA), (2368, 1760));
+        assert_eq!(canvas(1024, 1024, DEFAULT_MIN_AREA), (2048, 2048));
+        assert_eq!(canvas(1024, 1024, 1024), (1024, 1024));
     }
 
     #[test]

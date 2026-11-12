@@ -23,7 +23,7 @@ fn running(id: &str, step: u32) -> Generation {
 }
 
 fn asked(prompt: &str) -> ImageRequest {
-    ImageRequest { prompt: prompt.into(), seed: 7, width: 2048, height: 2048, min_generation_area: None, references: Vec::new() }
+    ImageRequest { prompt: prompt.into(), seed: 7, width: 2048, height: 2048, min_generation_area: None, references: Vec::new(), ..ImageRequest::default() }
 }
 
 /// A state that asked for each of `ids` itself.
@@ -32,6 +32,19 @@ fn knowing(mut s: State, ids: &[&str]) -> State {
         s.requests.insert((*id).to_owned(), asked("a fox"));
     }
     s
+}
+
+#[test]
+fn the_tuning_is_what_the_server_says_where_it_says_and_a_rerun_keeps_it() {
+    use crate::effort::Effort;
+    let sent = Tuning { attention: Some(Attention::Sol), sparse_start: Some(0.5), draft_steps: Some(2), ..Tuning::default() };
+    let request = ImageRequest { effort: Some(Effort::Low), tuning: sent, ..asked("a fox") };
+    let mut g = Gen::new("a".into(), Some(request), Phase::Queued);
+    assert_eq!(g.tuning(), sent, "without the server's word, what was sent");
+    g.asked = Some(Asked { prompt: Some("a fox".into()), attention: Some("dense".into()), attention_precision: Some("fp16".into()), ..Asked::default() });
+    assert_eq!(g.tuning(), Tuning { draft_steps: Some(2), ..Tuning::default() }, "the server ran it dense, so Sol-Attn's start goes too");
+    let again = g.rerun_request().unwrap();
+    assert_eq!((again.effort, again.tuning), (Some(Effort::Low), Tuning { draft_steps: Some(2), ..Tuning::default() }));
 }
 
 #[test]

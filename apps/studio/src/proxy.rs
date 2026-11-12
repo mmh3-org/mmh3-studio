@@ -176,7 +176,15 @@ mod tests {
 
         let client = Client::new(format!("http://{addr}"));
         assert!(client.status().is_ok());
-        let request = ImageRequest { prompt: "a fox".into(), seed: 1, width: 64, height: 64, min_generation_area: None, references: Vec::new() };
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            seed: 1,
+            width: 64,
+            height: 64,
+            min_generation_area: None,
+            references: Vec::new(),
+            ..ImageRequest::default()
+        };
         let created = client.create_image(&request).unwrap();
         let mut steps = Vec::new();
         client.events(&created.id, |g| steps.push(g.state)).unwrap();

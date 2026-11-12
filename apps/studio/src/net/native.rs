@@ -473,6 +473,8 @@ mod tests {
             width: 4096,
             height: 4096,
             min_generation_area: None,
+            effort: Some(crate::effort::Effort::Custom),
+            tuning: api::Tuning { attention: Some(api::Attention::Sol), sparse_tau: Some(1.5), sparse_start: Some(0.5), ..api::Tuning::default() },
             references: vec![PathBuf::from("/tmp/street.jpg")],
         };
         let requests: Requests = [("6912f3a40003".to_owned(), request)].into();
@@ -490,8 +492,15 @@ mod tests {
         let (used, unused) = (dir.join("a.png"), dir.join("b.png"));
         std::fs::write(&used, b"png").unwrap();
         std::fs::write(&unused, b"png").unwrap();
-        let request =
-            ImageRequest { prompt: "<Picture 1> at night".into(), seed: 3, width: 64, height: 64, min_generation_area: None, references: vec![used.clone()] };
+        let request = ImageRequest {
+            prompt: "<Picture 1> at night".into(),
+            seed: 3,
+            width: 64,
+            height: 64,
+            min_generation_area: None,
+            references: vec![used.clone()],
+            ..ImageRequest::default()
+        };
         prune_kept(&dir, &[("g1".to_owned(), request)].into());
         assert!(used.is_file());
         assert!(!unused.exists());
@@ -508,7 +517,15 @@ mod tests {
         let client = Client::new(format!("http://{addr}"));
         let dir = std::env::temp_dir().join(format!("mmh3-studio-probe-{}", std::process::id()));
         let pictures = Pictures { dir: dir.clone(), queue: Mutex::default() };
-        let request = ImageRequest { prompt: "a fox".into(), seed: 1, width: 64, height: 64, min_generation_area: None, references: Vec::new() };
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            seed: 1,
+            width: 64,
+            height: 64,
+            min_generation_area: None,
+            references: Vec::new(),
+            ..ImageRequest::default()
+        };
 
         let done = client.create_image(&request).unwrap();
         client.events(&done.id, |_| {}).unwrap();

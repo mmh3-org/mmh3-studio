@@ -20,7 +20,21 @@ use crate::api::{Asked, Generation, IMAGE_STEPS, Kind, MAX_REFERENCES, Memory, R
 const SLOTS: [&str; 5] = ["text_encoder", "video_vae", "audio_vae", "latent_upscaler", "dit"];
 /// What a video leaves in the table.
 const VIDEO_MODELS: [&str; 4] = ["text_encoder", "video_vae", "audio_vae", "dit"];
-const IMAGE_OPTIONS: [&str; 8] = ["prompt", "prompt-file", "reference", "width", "height", "min-generation-area", "seed", "attention-precision"];
+const IMAGE_OPTIONS: [&str; 13] = [
+    "prompt",
+    "prompt-file",
+    "reference",
+    "width",
+    "height",
+    "min-generation-area",
+    "seed",
+    "attention-precision",
+    "attention",
+    "sparse-tau",
+    "sparse-start",
+    "draft-steps",
+    "latent-upscaler",
+];
 const IMAGE_FILE_OPTIONS: [&str; 2] = ["prompt-file", "reference"];
 const MACHINE_OPTIONS: [&str; 10] = ["models", "dit", "text-encoder", "video-vae", "audio-vae", "devices", "vram-budget", "worker", "worker-units", "token"];
 const VIDEO_FILE_OPTIONS: [&str; 7] = ["prompt-file", "context", "first-frame", "last-frame", "reference", "reference-audio", "reference-video"];
@@ -162,6 +176,8 @@ fn asked(fields: &[Field], output: Output) -> Asked {
         attention_precision: given("attention-precision"),
         attention: given("attention").or_else(|| picture.then(|| "dense".to_owned())),
         references: fields.iter().filter(|f| f.name == "reference").filter_map(|f| f.filename.clone()).collect(),
+        // The fork's server says nothing of Sol-Attn's threshold and start or the draft steps.
+        ..Asked::default()
     }
 }
 
@@ -388,6 +404,41 @@ fn timed<T>(shared: &Shared, id: &str, stage: impl FnOnce(&mut Timings) -> &mut 
     out
 }
 
+/// The draft steps of a picture of `width`×`height` generated at `min_area` at least, with the
+/// options that trade its quality for time checked as `mmh3 image` checks them.
+fn draft_steps(fields: &[Field], width: usize, height: usize, min_area: usize) -> Result<usize, String> {
+    let given = |name: &str| fields.iter().rev().find(|f| f.name == name).map(Field::text);
+    if let Some(p) = given("attention-precision")
+        && !["fp32", "fp16", "int8-fp16"].contains(&p.as_str())
+    {
+        return Err(format!("Metal runs --attention-precision fp32, fp16 or int8-fp16, not {p}"));
+    }
+    let (canvas_width, canvas_height) = crate::sizes::canvas(width as u32, height as u32, min_area as u64);
+    let draft_steps = number(fields, "draft-steps", 0)?;
+    let draft = 2 * CANVAS_MULTIPLE as u32;
+    if draft_steps > 0 && (!canvas_width.is_multiple_of(draft) || !canvas_height.is_multiple_of(draft)) {
+        return Err(format!("--draft-steps needs a canvas of multiples of {draft}, not {canvas_width}×{canvas_height}"));
+    }
+    if draft_steps == 0 && given("latent-upscaler").is_some() {
+        return Err("--latent-upscaler enlarges the draft of --draft-steps".to_owned());
+    }
+    match given("attention").as_deref() {
+        None | Some("dense") => {}
+        Some("sol") => {
+            for name in ["sparse-tau", "sparse-start"] {
+                if let Some(v) = given(name) {
+                    let v: f32 = v.parse().map_err(|_| format!("--{name} must be a number"))?;
+                    if !v.is_finite() {
+                        return Err(format!("--{name} must be a finite number"));
+                    }
+                }
+            }
+        }
+        Some(other) => return Err(format!("--attention must be dense, sol, vsa or veda, not {other}")),
+    }
+    Ok(draft_steps)
+}
+
 /// What `mmh3 image` would make of the fields, in the order it checks them.
 fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Stop> {
     let width = number(fields, "width", DEFAULT_SIDE)?;
@@ -400,6 +451,7 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Stop>
     if !(1024..=16_777_216).contains(&min_area) {
         return Err("--min-generation-area must be from 1024 to 16777216".to_owned().into());
     }
+    let draft_steps = draft_steps(fields, width, height, min_area)?;
     let has = |name: &str| fields.iter().any(|f| f.name == name);
     let prompt = match (has("prompt"), has("prompt-file")) {
         (true, true) => return Err("pass either --prompt or --prompt-file".to_owned().into()),
@@ -418,6 +470,12 @@ fn picture(shared: &Shared, id: &str, fields: &[Field]) -> Result<Vec<u8>, Stop>
     }
     if references.len() > MAX_REFERENCES {
         return Err(format!("pass at most {MAX_REFERENCES} --reference pictures").into());
+    }
+    if draft_steps > 0 && !references.is_empty() {
+        return Err("--draft-steps cannot be combined with references".to_owned().into());
+    }
+    if draft_steps >= IMAGE_STEPS as usize {
+        return Err(format!("--draft-steps must leave at least one of the {IMAGE_STEPS} steps at full size").into());
     }
     if shared.cancelled(id) {
         return Err(Stop::Cancelled);

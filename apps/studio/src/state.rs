@@ -3,7 +3,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::{self, Asked, Generation, ImageRequest, Kind, Status, Timings};
+use crate::api::{self, Asked, Attention, Generation, ImageRequest, Kind, Status, Timings, Tuning};
 use crate::estimate::{self, Model, Sample};
 use crate::power::{Issue, Power};
 use crate::sizes::{self, ASPECTS, Quality, SizeError};
@@ -238,9 +238,28 @@ impl Gen {
             seed: self.seed().unwrap_or_default(),
             width,
             height,
-            min_generation_area: a.min_generation_area.or(local.and_then(|r| r.min_generation_area)),
+            min_generation_area: a.min_generation_area.or(local.as_ref().and_then(|r| r.min_generation_area)),
+            effort: local.and_then(|r| r.effort),
+            tuning: self.tuning(),
             references,
         })
+    }
+
+    /// The options that traded its quality for time: as the server says it ran them where it
+    /// says, and as the studio sent them otherwise.
+    pub fn tuning(&self) -> Tuning {
+        let local = self.request.as_ref().map(|r| r.tuning).unwrap_or_default();
+        let Some(a) = &self.asked else { return local };
+        let said = a.tuning();
+        let attention = if a.attention.is_some() { said.attention } else { local.attention };
+        let sol = attention == Some(Attention::Sol);
+        Tuning {
+            attention,
+            sparse_tau: said.sparse_tau.or(local.sparse_tau).filter(|_| sol),
+            sparse_start: said.sparse_start.or(local.sparse_start).filter(|_| sol),
+            draft_steps: if a.draft_steps.is_some() { said.draft_steps } else { local.draft_steps },
+            attention_precision: if a.attention_precision.is_some() { said.attention_precision } else { local.attention_precision },
+        }
     }
 
     pub fn file(&self) -> Option<&PathBuf> {
@@ -536,7 +555,7 @@ impl State {
             return Err(format!("{name} isn't a picture mmh3 can read. Remove it first."));
         }
         let references = self.references.iter().map(|r| r.path.clone()).collect();
-        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references })
+        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references, ..ImageRequest::default() })
     }
 
     pub fn generate(&mut self) {

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use std::sync::mpsc;
 
-use mmh3_studio::api::{Client, Error, Event, Generation, ImageRequest, Kind, State};
+use mmh3_studio::api::{Attention, Client, Error, Event, Generation, ImageRequest, Kind, Precision, State, Tuning};
 use mmh3_studio::mock::{self, Config};
 
 fn quick_server() -> Client {
@@ -45,7 +45,7 @@ fn ended(id: &str) -> impl Fn(&Event) -> bool + '_ {
 }
 
 fn request(prompt: &str, seed: u64) -> ImageRequest {
-    ImageRequest { prompt: prompt.into(), seed, width: 320, height: 256, min_generation_area: None, references: Vec::new() }
+    ImageRequest { prompt: prompt.into(), seed, width: 320, height: 256, min_generation_area: None, references: Vec::new(), ..ImageRequest::default() }
 }
 
 fn watch(client: &Client, id: &str) -> Vec<Generation> {
@@ -121,6 +121,21 @@ fn a_bad_value_fails_the_generation_rather_than_the_request() {
     let end = watch(&client, &g.id).pop().unwrap();
     assert_eq!((end.state, end.error.as_deref()), (State::Failed, Some("--width and --height must be at least 32")));
     assert!(matches!(client.image(&g.id), Err(Error::Refused { status: 409, ref message }) if message == "that generation failed"));
+}
+
+#[test]
+fn the_effort_s_fields_reach_the_server_and_are_checked_as_mmh3_checks_them() {
+    let client = quick_server();
+    let low = Tuning { attention: Some(Attention::Sol), draft_steps: Some(2), attention_precision: Some(Precision::Int8Fp16), ..Tuning::default() };
+    let g = client.create_image(&ImageRequest { width: 512, height: 384, min_generation_area: Some(1024), tuning: low, ..request("low", 1) }).unwrap();
+    let end = watch(&client, &g.id).pop().unwrap();
+    assert_eq!(end.state, State::Done);
+    let asked = end.request.unwrap();
+    assert_eq!((asked.attention.as_deref(), asked.attention_precision.as_deref()), (Some("sol"), Some("int8-fp16")));
+
+    let odd = client.create_image(&ImageRequest { width: 352, height: 256, min_generation_area: Some(1024), tuning: low, ..request("odd", 2) }).unwrap();
+    let end = watch(&client, &odd.id).pop().unwrap();
+    assert_eq!((end.state, end.error.as_deref()), (State::Failed, Some("--draft-steps needs a canvas of multiples of 64, not 352×256")));
 }
 
 #[test]

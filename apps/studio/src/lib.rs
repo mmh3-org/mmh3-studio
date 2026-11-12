@@ -1,4 +1,5 @@
 pub mod api;
+pub mod effort;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
 pub mod power;

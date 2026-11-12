@@ -156,7 +156,7 @@ fn an_event_split_over_data_lines_joins_with_newlines() {
 }
 
 fn request() -> ImageRequest {
-    ImageRequest { prompt: "a fox".into(), seed: 42, width: 2048, height: 1024, min_generation_area: None, references: Vec::new() }
+    ImageRequest { prompt: "a fox".into(), seed: 42, width: 2048, height: 1024, min_generation_area: None, references: Vec::new(), ..ImageRequest::default() }
 }
 
 fn names(parts: &[Part]) -> Vec<&str> {
@@ -174,6 +174,40 @@ fn the_request_gives_only_options_of_a_picture() {
     assert_eq!(names(&parts), ["prompt", "seed", "width", "height"]);
     let with_area = ImageRequest { min_generation_area: Some(4_194_304), ..request() };
     assert_eq!(with_area.parts().unwrap().last(), Some(&Part::Text { name: "min-generation-area", value: "4194304".into() }));
+}
+
+#[test]
+fn the_tuning_sends_only_what_it_changes_under_mmh3_s_names() {
+    let high = ImageRequest { effort: Some(Effort::High), ..request() };
+    assert_eq!(names(&high.parts().unwrap()), ["prompt", "seed", "width", "height"]);
+    let tuning = Tuning {
+        attention: Some(Attention::Sol),
+        sparse_tau: Some(1.5),
+        sparse_start: Some(0.5),
+        draft_steps: Some(2),
+        attention_precision: Some(Precision::Int8Fp16),
+    };
+    let fields = ImageRequest { tuning, ..request() }.fields();
+    assert_eq!(
+        fields[4..],
+        [
+            ("attention", "sol".to_owned()),
+            ("sparse-tau", "1.5".to_owned()),
+            ("sparse-start", "0.5".to_owned()),
+            ("draft-steps", "2".to_owned()),
+            ("attention-precision", "int8-fp16".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn what_the_server_says_of_the_tuning_reads_with_its_defaults_left_out() {
+    let asked: Asked =
+        serde_json::from_str(r#"{"attention":"dense","attention_precision":"fp16","sparse_tau":"1.5","sparse_start":0.5,"draft_steps":2}"#).unwrap();
+    assert_eq!((asked.sparse_tau, asked.sparse_start, asked.draft_steps), (Some(1.5), Some(0.5), Some(2)));
+    assert_eq!(asked.tuning(), Tuning { sparse_tau: Some(1.5), sparse_start: Some(0.5), draft_steps: Some(2), ..Tuning::default() });
+    let sol: Asked = serde_json::from_str(r#"{"attention":"sol","attention_precision":"int8-fp16"}"#).unwrap();
+    assert_eq!(sol.tuning(), Tuning { attention: Some(Attention::Sol), attention_precision: Some(Precision::Int8Fp16), ..Tuning::default() });
 }
 
 #[test]

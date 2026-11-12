@@ -11,7 +11,7 @@ fn server() -> Client {
 }
 
 fn small(prompt: &str, references: Vec<std::path::PathBuf>) -> ImageRequest {
-    ImageRequest { prompt: prompt.into(), seed: 7, width: 1024, height: 1024, min_generation_area: Some(1024), references }
+    ImageRequest { prompt: prompt.into(), seed: 7, width: 1024, height: 1024, min_generation_area: Some(1024), references, ..ImageRequest::default() }
 }
 
 fn watch(client: &Client, id: &str) -> Vec<Generation> {
