@@ -536,3 +536,50 @@ fn a_mac_at_full_speed_shows_no_banner_and_no_command() {
     assert!(rt.find("power-banner").is_none());
     assert_eq!(text_of(&rt, "status-power-text"), "High Power Mode, 140 W adapter");
 }
+
+#[test]
+fn the_effort_starts_at_the_server_s_defaults_and_low_sends_what_helps_at_the_size() {
+    use crate::api::{Attention, Tuning};
+    use crate::effort::Effort;
+    let mut rt = runtime(scenes::empty, false);
+    rt.update(|s, _| s.prompt.replace_text("a fox"));
+    tap(&mut rt, "quality-final");
+    let request = rt.state.request().unwrap();
+    assert_eq!((request.effort, request.tuning), (Some(Effort::High), Tuning::default()), "High sends nothing");
+    let high = text_of(&rt, "size-summary");
+    tap(&mut rt, "effort-low");
+    assert_eq!(rt.state.request().unwrap().tuning, Tuning { attention: Some(Attention::Sol), draft_steps: Some(2), ..Tuning::default() });
+    assert!(text_of(&rt, "effort-hint").contains("another composition"), "{}", text_of(&rt, "effort-hint"));
+    assert_ne!(text_of(&rt, "size-summary"), high, "the estimate follows the effort");
+    tap(&mut rt, "aspect-1");
+    assert_eq!(rt.state.request().unwrap().tuning, Tuning { attention: Some(Attention::Sol), ..Tuning::default() }, "4736 × 3552 takes no draft");
+    assert!(text_of(&rt, "effort-hint").contains("multiples of 64"), "{}", text_of(&rt, "effort-hint"));
+}
+
+#[test]
+fn medium_says_it_is_high_where_sol_attn_has_too_few_tokens() {
+    let rt = runtime(scenes::effort_small, false);
+    assert!(rt.state.request().unwrap().tuning.is_empty());
+    assert!(text_of(&rt, "effort-hint").starts_with("Same as High at this size"), "{}", text_of(&rt, "effort-hint"));
+}
+
+#[test]
+fn custom_shows_only_what_applies_and_holds_generate_back_on_a_bad_threshold() {
+    let mut rt = runtime(scenes::effort_custom, false);
+    for key in ["custom-attention", "custom-sol-from", "custom-tau", "custom-draft", "custom-precision"] {
+        assert!(rt.find(key).is_some(), "no {key} at 4096 × 4096");
+    }
+    let sent = rt.state.request().unwrap().tuning;
+    assert_eq!((sent.sparse_start, sent.draft_steps), (Some(0.5), Some(2)));
+    rt.update(|s, _| s.sparse_tau.replace_text("fast"));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.request().unwrap_err(), "Sol-Attn's tau must be a positive number.");
+    rt.update(|s, _| s.sparse_tau.replace_text("1.5"));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.request().unwrap().tuning.sparse_tau, Some(1.5));
+    tap(&mut rt, "quality-draft");
+    assert!(rt.find("custom-attention").is_none() && rt.find("custom-no-sol").is_some(), "2048 × 2048 has too few tokens for Sol-Attn");
+    assert!(rt.find("custom-draft").is_some());
+    let sent = rt.state.request().unwrap().tuning;
+    assert_eq!((sent.attention, sent.sparse_tau, sent.draft_steps), (None, None, Some(2)), "what does not apply is not sent");
+}

@@ -6,14 +6,18 @@ bin=${CARGO_TARGET_DIR:-../../target}/release
 app=$bin/mmh3-studio
 root=$bin/screenshot-dirs
 mkdir -p screenshots
-for scene in empty disconnected running previewing cancelled gallery failed custom-size offline-selected confirm-delete timing references power; do
+for scene in empty disconnected running previewing cancelled gallery failed custom-size offline-selected confirm-delete timing references power effort effort-small effort-custom; do
   for theme in light dark; do
     $app --snap "screenshots/scene-$scene-$theme.png" --scene "$scene" --size 1320x860 --scale 2 --theme "$theme" --at 1.0 >/dev/null
   done
 done
 $app --tree screenshots/scene-gallery-tree.json --scene gallery --at 1.0 >/dev/null
-for scene in disconnected running previewing cancelled gallery timing failed offline-selected power; do
+for scene in disconnected running previewing cancelled gallery timing failed offline-selected power effort-custom; do
   $app --snap "screenshots/small-$scene.png" --scene "$scene" --size 1040x680 --scale 2 --at 1.0 >/dev/null
+done
+# A phone-wide window shows the composer alone; tall enough to show the whole of Custom.
+for scene in effort effort-small effort-custom; do
+  $app --snap "screenshots/phone-$scene.png" --scene "$scene" --size 390x1500 --scale 2 --at 1.0 >/dev/null
 done
 
 live() {

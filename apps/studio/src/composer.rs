@@ -1,4 +1,5 @@
-use crate::api::MAX_REFERENCES;
+use crate::api::{IMAGE_STEPS, MAX_REFERENCES};
+use crate::effort::{Canvas, Effort, SOL_FROM, SOL_MIN_TOKENS, SOL_TAU, grouped};
 use crate::estimate::{Model, approx};
 use crate::sizes::{ASPECTS, MULTIPLE, Quality, megapixels};
 use rune::{El, Key, KeyEvent, SurfaceFit, Tx, col, el, icon, row, text};
@@ -105,6 +106,113 @@ fn custom_size(s: &State, k: &Kit) -> El {
         .child(field(&s.custom_h, "Height", "custom-height", |s| &mut s.custom_h))
 }
 
+/// How hard the picture works, each level with how long it should take at the size picked.
+fn effort(s: &State, model: &Model, k: &Kit) -> El {
+    let c = &k.c;
+    let size = s.chosen_size().ok();
+    let canvas = size.map(|size| s.canvas_for(size));
+    let mut group = row().key("effort").role("radiogroup").focus_group().label("Effort").w_full().equal_columns(4).gaps(6.0, 6.0);
+    for (i, e) in Effort::ALL.into_iter().enumerate() {
+        let on = s.effort == e;
+        let time = size.map_or_else(|| "–".to_owned(), |size| format!("≈ {}", approx(model.seconds(s.run_with(e, size), s.cold()))));
+        let content = col()
+            .px(8.0)
+            .py(8.0)
+            .gap(2.0)
+            .child(text(e.label()).font(k.ty.ui_medium).color(if on { c.text_base } else { c.text_muted }).truncate().a11y_hidden())
+            .child(text(time.clone()).key("effort-time").font(k.ty.small).color(c.text_muted).truncate().a11y_hidden());
+        let key = format!("effort-{}", e.label().to_lowercase());
+        group = group
+            .child(option(key, format!("{}, {time}", e.label()), on, k, content, move |s: &mut State| s.effort = e).position_in_set(i + 1, Effort::ALL.len()));
+    }
+    let hint = text(s.effort.hint(canvas)).key("effort-hint").font(k.ty.small).color(c.text_muted).wrap();
+    let mut out = col().key("effort-section").w_full().gap(8.0).child(section("Effort", k)).child(group).child(hint);
+    if let (Effort::Custom, Some(canvas)) = (s.effort, canvas) {
+        out = out.child(custom_effort(s, canvas, k));
+    }
+    out
+}
+
+/// A labelled row of small radio tiles, one for each of `items`: its label, whether it is the
+/// one chosen, and what choosing it does.
+fn choices(key: &str, title: &str, note: Option<&str>, items: Vec<(String, bool, Pick)>, k: &Kit) -> El {
+    let c = &k.c;
+    let n = items.len();
+    let mut group = row().key(key.to_owned()).role("radiogroup").focus_group().label(title.to_owned()).w_full().equal_columns(n).gaps(6.0, 6.0);
+    for (i, (label, on, pick)) in items.into_iter().enumerate() {
+        let content =
+            row().py(6.0).center().child(text(label.clone()).font(k.ty.small_medium).color(if on { c.text_base } else { c.text_muted }).a11y_hidden());
+        group = group.child(option(format!("{key}-{i}"), label, on, k, content, pick).position_in_set(i + 1, n));
+    }
+    let mut out = col().w_full().gap(6.0).child(section(title, k)).child(group);
+    if let Some(note) = note {
+        out = out.child(text(note.to_owned()).font(k.ty.small).color(c.text_faint).wrap());
+    }
+    out
+}
+
+type Pick = Box<dyn Fn(&mut State)>;
+
+fn note(key: &str, words: String, k: &Kit) -> El {
+    text(words).key(key.to_owned()).font(k.ty.small).color(k.c.text_faint).wrap()
+}
+
+/// Custom's options, only those that change anything at `canvas`.
+fn custom_effort(s: &State, canvas: Canvas, k: &Kit) -> El {
+    let custom = s.custom_effort;
+    let mut panel = col().key("effort-custom").w_full().gap(12.0).padding(10.0).radius(8.0).border(1.0, k.c.border_muted);
+    if canvas.sparse() {
+        let set = |sol: bool| -> Pick { Box::new(move |s: &mut State| s.custom_effort.sol = sol) };
+        panel = panel.child(choices(
+            "custom-attention",
+            "Attention",
+            Some("Sol-Attn skips what matters least; it may rewrite small lettering."),
+            vec![("Dense".into(), !custom.sol, set(false)), ("Sol-Attn".into(), custom.sol, set(true))],
+            k,
+        ));
+        if custom.sol {
+            let from = SOL_FROM
+                .iter()
+                .map(|&n| -> (String, bool, Pick) { (format!("Step {n}"), custom.sol_from == n, Box::new(move |s: &mut State| s.custom_effort.sol_from = n)) });
+            panel = panel.child(choices("custom-sol-from", "Sol-Attn from", Some("Starting later keeps lettering, and saves less."), from.collect(), k));
+            let error = s.tau().err();
+            let tau = TextInput::new(&s.sparse_tau)
+                .label("Sol-Attn threshold")
+                .placeholder(SOL_TAU.to_string())
+                .invalid(error.is_some())
+                .on_edit(|s: &mut State| &mut s.sparse_tau)
+                .build(k)
+                .key("custom-tau")
+                .w_full();
+            let words = error.unwrap_or_else(|| "Higher is sparser: faster, and further from dense.".to_owned());
+            panel = panel.child(col().w_full().gap(6.0).child(section("Sol-Attn threshold (tau)", k)).child(tau).child(note("custom-tau-note", words, k)));
+        }
+    } else {
+        panel = panel.child(note(
+            "custom-no-sol",
+            format!("No Sol-Attn: it needs {} tokens, and this canvas has {}.", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens())),
+            k,
+        ));
+    }
+    match canvas.draft() {
+        Ok(()) => {
+            let steps = (0..IMAGE_STEPS)
+                .map(|n| -> (String, bool, Pick) { (n.to_string(), custom.draft_steps == n, Box::new(move |s: &mut State| s.custom_effort.draft_steps = n)) });
+            let words = "The first steps run at half size; the same seed gives another composition.";
+            panel = panel.child(choices("custom-draft", "Draft steps", Some(words), steps.collect(), k));
+        }
+        Err(why) => panel = panel.child(note("custom-no-draft", format!("No draft steps: {why}."), k)),
+    }
+    let set = |int8: bool| -> Pick { Box::new(move |s: &mut State| s.custom_effort.int8 = int8) };
+    panel.child(choices(
+        "custom-precision",
+        "Attention precision",
+        Some("INT8 scores save little time and can change fine detail."),
+        vec![("FP16".into(), !custom.int8, set(false)), ("INT8 scores".into(), custom.int8, set(true))],
+        k,
+    ))
+}
+
 fn sizes(s: &State, k: &Kit) -> El {
     let c = &k.c;
     let model = s.time_model();
@@ -127,7 +235,8 @@ fn sizes(s: &State, k: &Kit) -> El {
         .gap(14.0)
         .child(col().w_full().gap(8.0).child(section("Quality", k)).child(quality(s, &model, k)))
         .child(col().w_full().gap(8.0).child(section("Aspect ratio", k)).child(aspects(s, k)))
-        .child(custom);
+        .child(custom)
+        .child(effort(s, &model, k));
     let summary = match s.chosen_size() {
         Ok(size) => {
             text(estimate(s, &model, size)).key("size-summary").font(k.ty.small).color(if s.gpu_held_back() { c.warning.fg } else { c.text_muted }).wrap()

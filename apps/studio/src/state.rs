@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{self, Asked, Attention, Generation, ImageRequest, Kind, Status, Timings, Tuning};
-use crate::effort::Canvas;
+use crate::effort::{Canvas, Custom, Effort};
 use crate::estimate::{self, Model, Run, Sample};
 use crate::power::{Issue, Power};
 use crate::sizes::{self, ASPECTS, Quality, SizeError};
@@ -370,6 +370,10 @@ pub struct State {
     pub custom_size: bool,
     pub custom_w: TextEdit,
     pub custom_h: TextEdit,
+    pub effort: Effort,
+    /// What Custom is set to, but for its threshold, which is typed into [`State::sparse_tau`].
+    pub custom_effort: Custom,
+    pub sparse_tau: TextEdit,
     pub seed: TextEdit,
     pub references: Vec<Reference>,
     /// Files are being dragged over the composer.
@@ -444,6 +448,9 @@ impl State {
             custom_size: false,
             custom_w: TextEdit::new("1536"),
             custom_h: TextEdit::new("1024"),
+            effort: Effort::default(),
+            custom_effort: Custom::default(),
+            sparse_tau: TextEdit::new(""),
             seed: TextEdit::new(random_seed().to_string()),
             references: Vec::new(),
             dropping: false,
@@ -532,9 +539,38 @@ impl State {
         }))
     }
 
+    /// The canvas the composer's picture would be generated on at `size`.
+    pub fn canvas_for(&self, size: (u32, u32)) -> Canvas {
+        Canvas::new(size, None, !self.references.is_empty())
+    }
+
+    /// Custom's threshold for Sol-Attn: `None` leaves the server's.
+    pub fn tau(&self) -> Result<Option<f64>, String> {
+        let t = self.sparse_tau.text.trim();
+        if t.is_empty() {
+            return Ok(None);
+        }
+        t.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0).map(Some).ok_or_else(|| "Sol-Attn's tau must be a positive number.".to_owned())
+    }
+
+    /// Whether Custom shows the threshold for Sol-Attn at `canvas`, and so sends it.
+    pub fn asks_tau(&self, canvas: Canvas) -> bool {
+        self.effort == Effort::Custom && self.custom_effort.sol && canvas.sparse()
+    }
+
+    /// What `effort` would send at `size`, leaving out a threshold that isn't a number.
+    pub fn tuning_with(&self, effort: Effort, size: (u32, u32)) -> Tuning {
+        effort.tuning(self.canvas_for(size), &Custom { tau: self.tau().ok().flatten(), ..self.custom_effort })
+    }
+
+    /// How the composer's picture would run at `size` with `effort`.
+    pub fn run_with(&self, effort: Effort, size: (u32, u32)) -> Run {
+        self.canvas_for(size).run(&self.tuning_with(effort, size))
+    }
+
     /// How the composer's picture would run at `size`.
     pub fn run_for(&self, size: (u32, u32)) -> Run {
-        Canvas::new(size, None, !self.references.is_empty()).run(&Tuning::default())
+        self.run_with(self.effort, size)
     }
 
     /// The server answers but holds no `dit` model, so the next generation loads it first.
@@ -566,8 +602,20 @@ impl State {
             let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
             return Err(format!("{name} isn't a picture mmh3 can read. Remove it first."));
         }
+        if self.asks_tau(self.canvas_for((width, height))) {
+            self.tau()?;
+        }
         let references = self.references.iter().map(|r| r.path.clone()).collect();
-        Ok(ImageRequest { prompt: prompt.to_owned(), seed, width, height, min_generation_area: None, references, ..ImageRequest::default() })
+        Ok(ImageRequest {
+            prompt: prompt.to_owned(),
+            seed,
+            width,
+            height,
+            min_generation_area: None,
+            effort: Some(self.effort),
+            tuning: self.tuning_with(self.effort, (width, height)),
+            references,
+        })
     }
 
     pub fn generate(&mut self) {

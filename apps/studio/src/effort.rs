@@ -171,7 +171,7 @@ impl Effort {
                 _ => "Pick a valid size to see what this level changes.".into(),
             };
         };
-        let short = format!("Sol-Attn needs {SOL_MIN_TOKENS} tokens (32 × 32 pixels each), and this canvas has {}", canvas.tokens());
+        let short = format!("Sol-Attn needs {} tokens (32 × 32 pixels each), and this canvas has {}", grouped(SOL_MIN_TOKENS), grouped(canvas.tokens()));
         match (self, canvas.sparse(), canvas.draft()) {
             (Effort::High, ..) => "The server's defaults: the most faithful picture, and the longest wait.".into(),
             (Effort::Custom, ..) => "Only the options that change anything at this size are shown.".into(),
@@ -186,6 +186,19 @@ impl Effort {
             (Effort::Low, false, Err(why)) => format!("Same as High at this size: {why}, and {}.", lower(&short)),
         }
     }
+}
+
+/// `n` with its thousands set apart: 12,288.
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
 }
 
 fn lower(s: &str) -> String {

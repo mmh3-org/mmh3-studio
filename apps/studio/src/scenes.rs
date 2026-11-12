@@ -7,8 +7,9 @@ use crate::mock::{paint, preview};
 use crate::net::Feed;
 use crate::power::{Chip, Mode, Power, Source};
 
+use crate::effort::{Custom, Effort};
 use crate::sizes::Quality;
-use crate::state::{Conn, Gen, Live, Phase, Picture, Reference, SizeChoice, State, Thumb};
+use crate::state::{Conn, Gen, Live, Pane, Phase, Picture, Reference, SizeChoice, State, Thumb};
 
 type Scene = (&'static str, fn(&mut State));
 
@@ -26,6 +27,9 @@ pub const SCENES: &[Scene] = &[
     ("timing", timing),
     ("references", references),
     ("power", power),
+    ("effort", effort),
+    ("effort-small", effort_small),
+    ("effort-custom", effort_custom),
 ];
 
 pub fn status(busy: bool, queued: u32) -> Status {
@@ -229,6 +233,29 @@ pub fn references(s: &mut State) {
         let thumb = thumb.map_or(Thumb::Loading, Thumb::Ready);
         s.references.push(Reference { path: PathBuf::from(format!("/Users/me/Pictures/{name}")), thumb });
     }
+}
+
+/// The composer at Final 1:1 on Low: two half-size draft steps and Sol-Attn.
+pub fn effort(s: &mut State) {
+    gallery(s);
+    s.pane = Pane::Compose;
+    s.prompt.replace_text("A cathedral made of glass in a pine forest, morning fog, volumetric light");
+    s.size = SizeChoice { quality: Quality::Final, aspect: 0 };
+    s.effort = Effort::Low;
+}
+
+/// Medium at Draft 4:3, too few tokens for Sol-Attn, so it says it is the same as High.
+pub fn effort_small(s: &mut State) {
+    effort(s);
+    s.size = SizeChoice { quality: Quality::Draft, aspect: 1 };
+    s.effort = Effort::Medium;
+}
+
+/// Custom at Final 1:1: Sol-Attn from the fourth step and two draft steps.
+pub fn effort_custom(s: &mut State) {
+    effort(s);
+    s.effort = Effort::Custom;
+    s.custom_effort = Custom { sol: true, sol_from: 4, draft_steps: 2, ..Custom::default() };
 }
 
 /// A 14-inch laptop with a Max chip in Automatic Energy Mode on a 90 W adapter, which
