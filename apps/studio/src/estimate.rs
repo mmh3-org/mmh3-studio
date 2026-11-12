@@ -24,6 +24,9 @@ pub const MEASURED: Model = Model { fixed: 3.0, step: [0.754, 0.0705], decode: [
 /// How many of the latest finished generations the fit looks at, so it follows a Mac whose
 /// power settings change.
 const RECENT: usize = 24;
+/// The least time loading that says a run read its models, rather than finding them held: the
+/// server times its loads on every run, and a warm one takes a few hundredths of a second.
+const COLD_LOAD: f64 = 1.0;
 
 impl Model {
     pub fn step_at(&self, mp: f64) -> f64 {
@@ -72,8 +75,8 @@ fn median(values: impl IntoIterator<Item = f64>) -> Option<f64> {
 }
 
 /// Scales [`MEASURED`] to `samples`, newest first. Generations with stage timings scale each
-/// part on its own; without any, the total scales the whole. The median keeps one cold start
-/// or one slow run from moving it.
+/// part on its own, the load from the ones that read their models; without any, the total
+/// scales the whole. The median keeps one cold start or one slow run from moving it.
 pub fn fit(samples: impl IntoIterator<Item = Sample>) -> Model {
     let m = MEASURED;
     let samples: Vec<Sample> = samples.into_iter().filter(|s| s.mp > 0.0 && s.seconds > 0.0).take(RECENT).collect();
@@ -87,7 +90,7 @@ pub fn fit(samples: impl IntoIterator<Item = Sample>) -> Model {
             (total - t.load().unwrap_or(0.0) - t.steps.iter().sum::<f64>() - decoded) / m.fixed
         }))
         .unwrap_or(step);
-        let load = median(timed.iter().filter_map(|(_, _, t)| t.load().map(|l| l / m.load))).unwrap_or(step);
+        let load = median(timed.iter().filter_map(|(_, _, t)| t.load().filter(|l| *l >= COLD_LOAD).map(|l| l / m.load))).unwrap_or(step);
         return m.scaled(fixed, step, decode, load);
     }
     match median(samples.iter().map(|s| s.seconds / m.warm(s.mp))) {
@@ -187,5 +190,27 @@ mod tests {
         assert!((fitted.fixed - 6.0).abs() < 1e-9);
         assert!((fitted.load - 12.0).abs() < 1e-9);
         assert!((fitted.warm(full) - (total - 12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_load_is_fitted_from_cold_starts_alone() {
+        let draft = mp(2048, 2048);
+        let run = |load_text, load_dit| Timings {
+            load_text,
+            encode: Some(0.5),
+            load_dit: Some(load_dit),
+            steps: vec![MEASURED.step_at(draft); 6],
+            decode_read: Some(0.0004),
+            decode: Some(MEASURED.decode_at(draft)),
+            write: Some(0.2),
+        };
+        let sample = |t: Timings| Sample { mp: draft, seconds: MEASURED.warm(draft) + t.load().unwrap_or(0.0), timings: Some(t) };
+        let cold = sample(run(Some(1.89), 10.53));
+        let warm = || sample(run(None, 0.0548));
+        let fitted = fit([warm(), warm(), cold, warm()]);
+        assert!((fitted.load - (1.89 + 10.53 + 0.0004)).abs() < 1e-9, "{}", fitted.load);
+        assert!((fitted.fixed - MEASURED.fixed).abs() < 1e-9, "a warm run's own load is not fixed time");
+        let fitted = fit([warm(), warm()]);
+        assert!((fitted.load - MEASURED.load).abs() < 1e-9, "without a cold start the measured load stays");
     }
 }
