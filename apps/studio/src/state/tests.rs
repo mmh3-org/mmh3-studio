@@ -315,6 +315,9 @@ fn only_a_server_with_the_event_stream_is_asked_to_stop_one() {
     assert!(!s.can_stop(s.item("r").unwrap()), "asked once is enough");
     s.cancelled("r", Err(api::Error::Refused { status: 409, message: "that generation has ended".into() }), 1.0);
     assert!(!s.item("r").unwrap().stopping);
+    assert!(s.notes.is_empty(), "one that got to its end first is no failure to stop it");
+    s.stop("r");
+    s.cancelled("r", Err(api::Error::Unreachable("refused".into())), 1.0);
     assert_eq!(s.notes.last().map(|n| n.title.as_str()), Some("Couldn't stop the generation."));
     s.stop("r");
     s.cancelled("r", Ok(running("r", 2)), 1.0);
@@ -324,6 +327,13 @@ fn only_a_server_with_the_event_stream_is_asked_to_stop_one() {
     assert_eq!((&r.phase, r.stopping), (&Phase::Cancelled { step: Some(3) }, false));
     s.delete("r");
     assert_eq!(s.deleting.as_deref(), Some("r"), "a cancelled generation can be deleted");
+
+    // Past its last step it is decoding, which the server cannot stop.
+    s.requests.insert("w".into(), asked("a fox"));
+    s.merge(&[running("w", 6)], 3.0);
+    assert!(!s.can_stop(s.item("w").unwrap()));
+    s.stop("w");
+    assert!(!s.item("w").unwrap().stopping);
 }
 
 #[test]

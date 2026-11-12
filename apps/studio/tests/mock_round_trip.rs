@@ -271,6 +271,10 @@ fn a_queued_generation_is_cancelled_at_once_and_a_running_one_at_its_next_step()
 
     let answer = client.cancel(&queued.id).unwrap();
     assert_eq!(answer.state, State::Cancelled, "one waiting never runs");
+    assert!(
+        matches!(client.cancel(&queued.id), Err(Error::Refused { status: 409, ref message }) if message == "that generation has ended"),
+        "a cancelled one has ended too"
+    );
     let answer = client.cancel(&running.id).unwrap();
     assert_eq!(answer.state, State::Running, "one running finishes its step first");
     let mut end = None;

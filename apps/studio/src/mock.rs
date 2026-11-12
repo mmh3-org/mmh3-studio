@@ -673,10 +673,14 @@ fn written(stream: &mut TcpStream, shared: &Shared, id: &str, wanted: Output) ->
 
 /// Stops job `id`: one waiting is dropped at once, one running stops at its next step.
 fn cancel(stream: &mut TcpStream, shared: &Shared, id: &str) -> std::io::Result<()> {
-    let state = shared.lock().list.iter().find(|j| j.id == id).map(|j| j.state);
-    match state {
+    // A run stops only at a step's boundary, so one past its last step goes on to its picture.
+    let state = shared.lock().list.iter().find(|j| j.id == id).map(|j| (j.state, j.step.zip(j.steps).is_some_and(|(k, n)| k >= n)));
+    match state.map(|(state, _)| state) {
         None => return refuse(stream, 404, "no such generation"),
-        Some(State::Done | State::Failed) => return refuse(stream, 409, "that generation has ended"),
+        Some(State::Done | State::Failed | State::Cancelled) => return refuse(stream, 409, "that generation has ended"),
+        Some(State::Running) if state.is_some_and(|(_, past)| past) => {
+            return refuse(stream, 409, "that generation has taken its last step and is writing what it made");
+        }
         Some(State::Queued) => {
             shared.lock().waiting.retain(|w| w != id);
             shared.update(id, |j| {
@@ -685,7 +689,6 @@ fn cancel(stream: &mut TcpStream, shared: &Shared, id: &str) -> std::io::Result<
             });
         }
         Some(State::Running) => shared.update(id, |j| j.cancel = true),
-        Some(State::Cancelled) => {}
     }
     match find(shared, id) {
         Some(g) => generation(stream, shared, 202, &g, &[]),

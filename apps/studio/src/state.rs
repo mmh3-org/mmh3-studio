@@ -53,6 +53,16 @@ impl Phase {
     pub fn is_active(&self) -> bool {
         matches!(self, Phase::Sending | Phase::Queued | Phase::Running { .. })
     }
+
+    /// Waiting, or running with a step still to take: the server stops a run only at a step's
+    /// boundary, so one decoding or writing its picture can no longer be stopped.
+    pub fn stoppable(&self) -> bool {
+        match self {
+            Phase::Queued => true,
+            Phase::Running { step, steps, .. } => step.is_none_or(|k| k < *steps),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -690,7 +700,7 @@ impl State {
     /// Asks the server to stop a generation that is waiting or running.
     pub fn stop(&mut self, id: &str) {
         let Some(g) = self.gens.iter_mut().find(|g| g.id == id) else { return };
-        if !matches!(g.phase, Phase::Queued | Phase::Running { .. }) || g.stopping {
+        if !g.phase.stoppable() || g.stopping {
             return;
         }
         g.stopping = true;
@@ -700,7 +710,8 @@ impl State {
         }
     }
 
-    /// The server's answer to [`State::stop`].
+    /// The server's answer to [`State::stop`]. A 409 says it got there first: it has ended, or
+    /// has taken its last step and is writing the picture, which the event stream brings.
     pub fn cancelled(&mut self, id: &str, answer: Result<Generation, api::Error>, now: f64) {
         match answer {
             Ok(g) => self.apply(&g, now),
@@ -709,7 +720,9 @@ impl State {
                     g.stopping = false;
                     g.revision += 1;
                 }
-                self.note("Couldn't stop the generation.", Some(e.to_string()), true);
+                if !matches!(e, api::Error::Refused { status: 409, .. }) {
+                    self.note("Couldn't stop the generation.", Some(e.to_string()), true);
+                }
             }
         }
     }
@@ -717,7 +730,7 @@ impl State {
     /// Whether the server can stop a generation: only the fork's can, which is the one with the
     /// event stream.
     pub fn can_stop(&self, g: &Gen) -> bool {
-        self.feed == Feed::Streaming && matches!(g.phase, Phase::Queued | Phase::Running { .. }) && !g.stopping
+        self.feed == Feed::Streaming && g.phase.stoppable() && !g.stopping
     }
 
     /// Asks for a finished generation's picture: `urgent` for one the user waits for (just
