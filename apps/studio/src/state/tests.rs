@@ -262,13 +262,30 @@ fn a_preview_shows_until_the_picture_does_and_an_older_one_never_replaces_a_newe
     let one = image(&s);
     s.preview_ready("a", 1, Ok(one));
     assert_eq!(s.item("a").unwrap().live.as_ref().map(|l| l.step), Some(2), "a late answer for an older step is dropped");
+    s.preview_available("a", 3);
     s.preview_ready("a", 3, Err("gone".into()));
     assert_eq!(s.item("a").unwrap().live.as_ref().map(|l| l.step), Some(2), "a failed fetch keeps the last one");
+    assert_eq!(s.item("a").unwrap().preview_wanted(), None, "a failed fetch is not tried again at once");
     s.preview_available("a", 4);
     assert_eq!(s.item("a").unwrap().preview_step, Some(4));
+    assert_eq!(s.item("a").unwrap().preview_wanted(), Some(4), "a newer preview is");
     let thumb = image(&s);
     s.picture_ready("a", PathBuf::from("/tmp/a.png"), thumb);
     assert!(s.item("a").unwrap().live.is_none(), "the picture replaces its preview");
+}
+
+#[test]
+fn a_preview_that_could_not_be_fetched_is_asked_for_again_only_with_the_next_snapshot() {
+    let mut s = knowing(online(), &["a"]);
+    let cancelled = Generation { preview_step: Some(2), ..server("a", api::State::Cancelled) };
+    s.merge(std::slice::from_ref(&cancelled), 0.0);
+    assert_eq!(s.item("a").unwrap().preview_wanted(), Some(2));
+    s.preview_ready("a", 2, Err("404".into()));
+    assert_eq!(s.item("a").unwrap().preview_wanted(), None);
+    s.upsert(&cancelled, 1.0);
+    assert_eq!(s.item("a").unwrap().preview_wanted(), None, "an event about it is no reason");
+    s.merge(&[cancelled], 2.0);
+    assert_eq!(s.item("a").unwrap().preview_wanted(), Some(2));
 }
 
 #[test]

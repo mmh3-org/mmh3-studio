@@ -123,6 +123,9 @@ pub struct Gen {
     pub live: Option<Live>,
     /// The step of the preview being fetched.
     pub fetching_preview: Option<u32>,
+    /// The step whose preview could not be fetched, which is not asked for again until the server
+    /// has a newer one or says everything again.
+    pub missed_preview: Option<u32>,
     /// The studio asked the server to stop it.
     pub stopping: bool,
     pub revision: u64,
@@ -140,6 +143,7 @@ impl Gen {
             preview_step: None,
             live: None,
             fetching_preview: None,
+            missed_preview: None,
             stopping: false,
             revision: 0,
         }
@@ -149,6 +153,15 @@ impl Gen {
         let mut item = Gen::new(g.id.clone(), request, Phase::Queued);
         let _ = item.take(g, now);
         item
+    }
+
+    /// The step of the preview to fetch next, if any: the latest of a picture that is running or
+    /// was cancelled, newer than the one shown and not the one that could not be fetched.
+    pub fn preview_wanted(&self) -> Option<u32> {
+        if !matches!(self.phase, Phase::Running { .. } | Phase::Cancelled { .. }) || self.fetching_preview.is_some() {
+            return None;
+        }
+        self.preview_step.filter(|k| self.live.as_ref().is_none_or(|l| l.step < *k) && self.missed_preview != Some(*k))
     }
 
     /// Takes in what the server says of it now.
@@ -644,10 +657,7 @@ impl State {
     fn want_preview(&mut self, id: &str) {
         let Some(net) = &self.net else { return };
         let Some(g) = self.gens.iter_mut().find(|g| g.id == id) else { return };
-        if !matches!(g.phase, Phase::Running { .. } | Phase::Cancelled { .. }) || g.fetching_preview.is_some() {
-            return;
-        }
-        let Some(step) = g.preview_step.filter(|k| g.live.as_ref().is_none_or(|l| l.step < *k)) else { return };
+        let Some(step) = g.preview_wanted() else { return };
         g.fetching_preview = Some(step);
         net.fetch_preview(id.to_owned(), step);
     }
@@ -664,11 +674,13 @@ impl State {
         g.fetching_preview = None;
         // A picture already shown has no use for its preview, and one missed is not worth a note:
         // the next step brings another.
-        if let (Ok(image), Picture::None | Picture::Loading) = (image, &g.picture)
-            && g.live.as_ref().is_none_or(|l| l.step < step)
-        {
-            g.live = Some(Live { step, image });
-            g.revision += 1;
+        match (image, &g.picture) {
+            (Ok(image), Picture::None | Picture::Loading) if g.live.as_ref().is_none_or(|l| l.step < step) => {
+                g.live = Some(Live { step, image });
+                g.revision += 1;
+            }
+            (Ok(_), _) => {}
+            (Err(_), _) => g.missed_preview = Some(step),
         }
         self.want_preview(id);
     }
@@ -742,6 +754,7 @@ impl State {
             let item = match old.iter().position(|o| o.id == g.id) {
                 Some(at) => {
                     let mut item = old.remove(at);
+                    item.missed_preview = None;
                     effects.extend(item.take(g, now).into_iter().map(|e| (g.id.clone(), e)));
                     item
                 }
