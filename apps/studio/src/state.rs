@@ -1129,6 +1129,48 @@ impl State {
         self.show_composer();
     }
 
+    /// Puts a generation's prompt back in the composer with the seed, size and effort it was
+    /// asked at; an unknown seed leaves the field empty, so it is random as it was. Pictures to
+    /// edit are left as they are: the composer's own may be the ones meant, and the server may
+    /// hold the only copies, so a note says when what is attached differs from what it edited.
+    pub fn use_prompt(&mut self, id: &str) {
+        let Some(g) = self.item(id).filter(|g| g.is_known()) else { return };
+        let (prompt, seed, size, edits) = (g.prompt().to_owned(), g.seed(), g.size(), g.has_references());
+        let (effort, tuning) = (g.effort().unwrap_or(Effort::High), g.tuning());
+        self.prompt.replace_text(prompt);
+        self.seed.replace_text(seed.map(|s| s.to_string()).unwrap_or_default());
+        if let Some(size) = size {
+            self.use_size(size);
+        }
+        self.use_effort(effort, &tuning);
+        match (edits, self.references.is_empty()) {
+            (true, true) => self.note("Its pictures to edit aren't attached.", Some("Attach them to edit them again.".into()), false),
+            (false, false) => self.note("The pictures attached are still attached.", Some("Generate edits them; remove them for a new picture.".into()), false),
+            _ => {}
+        }
+        self.show_composer();
+    }
+
+    /// Picks `size` where the picker offers it, and types it into the custom size otherwise.
+    fn use_size(&mut self, (w, h): (u32, u32)) {
+        let mut offered = Quality::ALL.into_iter().flat_map(|quality| (0..ASPECTS.len()).map(move |aspect| SizeChoice { quality, aspect }));
+        if let Some(c) = offered.find(|c| c.size() == (w, h)) {
+            return self.pick_size(c);
+        }
+        self.custom_size = true;
+        self.custom_w.replace_text(w.to_string());
+        self.custom_h.replace_text(h.to_string());
+    }
+
+    /// Sets the effort a picture was asked at, and Custom to what it traded when that is the level.
+    fn use_effort(&mut self, effort: Effort, tuning: &Tuning) {
+        self.effort = effort;
+        if effort == Effort::Custom {
+            self.custom_effort = Custom::from_tuning(tuning);
+            self.sparse_tau.replace_text(tuning.sparse_tau.map(|t| t.to_string()).unwrap_or_default());
+        }
+    }
+
     /// Brings the composer into view, wide or compact.
     pub fn show_composer(&mut self) {
         self.inspector.set_open(true);

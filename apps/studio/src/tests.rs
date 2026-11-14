@@ -594,3 +594,14 @@ fn a_picture_s_row_and_details_say_what_effort_it_was_asked_at() {
     assert!(statuses.iter().any(|t| t == "5472×3072 · Medium · 241.8 s"), "{statuses:?}");
     assert!(statuses.iter().any(|t| t == "2048×2048 · 38.7 s"), "High says nothing: {statuses:?}");
 }
+
+#[test]
+fn use_prompt_loads_the_selected_picture_s_prompt_and_seed_into_the_composer() {
+    let mut rt = runtime(scenes::gallery, false);
+    let g = rt.state.selected_gen().unwrap();
+    let (prompt, seed, size) = (g.prompt().to_owned(), g.seed().unwrap().to_string(), g.size().unwrap());
+    tap(&mut rt, "use-prompt");
+    assert_eq!((rt.state.prompt.text.as_str(), rt.state.seed.text.as_str()), (prompt.as_str(), seed.as_str()));
+    assert_eq!(rt.state.chosen_size(), Ok(size));
+    assert!(rt.find("prompt").is_some());
+}

@@ -452,3 +452,86 @@ fn the_tags_a_prompt_mentions_without_a_picture_are_found_once_each() {
     assert_eq!(missing_pictures("<Picture 3> by <Picture 1>, then <Picture 3> and <Picture 0>", 1), [0, 3]);
     assert_eq!(missing_pictures("<Picture x> and <Picture 2", 0), Vec::<usize>::new(), "only whole tags count");
 }
+
+#[test]
+fn use_prompt_restores_the_prompt_size_effort_and_seed() {
+    let mut s = online();
+    let tuning = Tuning { attention: Some(Attention::Sol), sparse_start: Some(0.5), sparse_tau: Some(1.5), draft_steps: Some(2), ..Tuning::default() };
+    let custom = ImageRequest { seed: 123, width: 1024, height: 768, effort: Some(Effort::Custom), tuning, ..asked("a fox at dusk") };
+    s.gens.push(Gen::new("custom".into(), Some(custom), Phase::Done { seconds: 1.0, timings: None }));
+    let tuning = Effort::Low.tuning(s.canvas_for((4736, 3552)), &Custom::default());
+    let low = ImageRequest { seed: 9, width: 4736, height: 3552, effort: Some(Effort::Low), tuning, ..asked("a fox at dawn") };
+    s.gens.push(Gen::new("low".into(), Some(low), Phase::Done { seconds: 1.0, timings: None }));
+    s.gens.push(Gen::new("unknown".into(), None, Phase::Done { seconds: 1.0, timings: None }));
+
+    s.use_prompt("custom");
+    assert_eq!((s.prompt.text.as_str(), s.seed.text.as_str()), ("a fox at dusk", "123"));
+    assert_eq!(s.chosen_size(), Ok((1024, 768)));
+    assert!(s.custom_size, "a size the picker doesn't offer is typed in");
+    assert_eq!(s.effort, Effort::Custom);
+    assert_eq!((s.custom_effort.sol, s.custom_effort.sol_from, s.custom_effort.draft_steps), (true, 4, 2));
+    assert_eq!(s.sparse_tau.text, "1.5");
+    assert_eq!(s.pane, Pane::Compose);
+    assert!(s.notes.is_empty(), "nothing to say of a picture that edited nothing");
+
+    s.use_prompt("low");
+    assert_eq!((s.prompt.text.as_str(), s.seed.text.as_str()), ("a fox at dawn", "9"));
+    assert_eq!((s.custom_size, s.size), (false, SizeChoice { quality: Quality::Final, aspect: 1 }));
+    assert_eq!(s.effort, Effort::Low, "a level remembered replaces Custom");
+    assert_eq!(s.request().unwrap().seed, 9);
+
+    s.use_prompt("unknown");
+    assert_eq!(s.prompt.text, "a fox at dawn", "a prompt that isn't known leaves the composer alone");
+}
+
+#[test]
+fn use_prompt_takes_a_level_the_studio_does_not_remember_from_what_the_server_says() {
+    let mut s = online();
+    let mut theirs = fork("a", api::State::Done, "a fox");
+    if let Some(r) = &mut theirs.request {
+        r.attention = Some("sol".into());
+        r.draft_steps = Some(3);
+    }
+    s.merge(&[theirs, fork("b", api::State::Done, "a hare")], 0.0);
+    s.use_prompt("a");
+    assert_eq!((s.prompt.text.as_str(), s.seed.text.as_str(), s.chosen_size()), ("a fox", "9", Ok((1024, 768))));
+    assert_eq!((s.effort, s.custom_effort.sol, s.custom_effort.draft_steps), (Effort::Custom, true, 3), "what it traded, as Custom");
+    s.use_prompt("b");
+    assert_eq!((s.effort, s.prompt.text.as_str()), (Effort::High, "a hare"), "one that traded nothing is High");
+}
+
+#[test]
+fn use_prompt_loads_an_edit_s_settings_and_says_when_the_pictures_attached_differ() {
+    let mut s = online();
+    let mut edit = fork("edit", api::State::Done, "<Picture 1> at night");
+    if let Some(r) = &mut edit.request {
+        r.references = vec!["picture-1.jpg".into()];
+        r.draft_steps = Some(2);
+    }
+    let mut seedless = fork("seedless", api::State::Done, "a hare");
+    if let Some(r) = &mut seedless.request {
+        r.seed = None;
+    }
+    s.merge(&[edit, fork("plain", api::State::Done, "a fox"), seedless], 0.0);
+    s.effort = Effort::Medium;
+    s.pick_size(SizeChoice { quality: Quality::Final, aspect: 0 });
+    assert!(s.item("edit").unwrap().rerun_request().is_none(), "the server holds its only pictures");
+
+    s.use_prompt("edit");
+    assert_eq!((s.prompt.text.as_str(), s.seed.text.as_str(), s.chosen_size()), ("<Picture 1> at night", "9", Ok((1024, 768))));
+    assert_eq!((s.effort, s.custom_effort.draft_steps), (Effort::Custom, 2), "size and effort load without its pictures");
+    assert_eq!(s.notes.last().map(|n| (n.title.as_str(), n.danger)), Some(("Its pictures to edit aren't attached.", false)));
+    assert_eq!(s.pane, Pane::Compose);
+
+    s.notes.clear();
+    s.references.push(Reference { path: PathBuf::from("/tmp/street.jpg"), thumb: Thumb::Loading });
+    s.use_prompt("edit");
+    assert!(s.notes.is_empty(), "the pictures attached may be the ones meant");
+
+    s.use_prompt("plain");
+    assert_eq!(s.notes.last().map(|n| n.title.as_str()), Some("The pictures attached are still attached."), "Generate would edit them");
+    assert_eq!(s.references.len(), 1, "the user's pictures are kept");
+
+    s.use_prompt("seedless");
+    assert_eq!((s.prompt.text.as_str(), s.seed.text.as_str()), ("a hare", ""), "a seed not known is random, as it was");
+}

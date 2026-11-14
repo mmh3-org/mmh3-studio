@@ -394,6 +394,8 @@ fn actions(s: &State, g: &Gen, k: &Kit) -> El {
     }
     let i = id.clone();
     actions = actions.child(tool(&icons::PICTURE, "edit-picture", "Edit this picture", !done, k, Box::new(move |s, _| s.edit_picture(&i))));
+    let i = id.clone();
+    actions = actions.child(tool(&icons::USE_PROMPT, "use-prompt", "Use prompt", !known, k, Box::new(move |s, _| s.use_prompt(&i))));
     let prompt = g.prompt().to_owned();
     actions = actions.child(tool(&icons::COPY, "copy-prompt", "Copy prompt", !known, k, Box::new(move |_, tx| tx.copy(prompt.clone()))));
     let seed = g.seed().map(|s| s.to_string()).unwrap_or_default();

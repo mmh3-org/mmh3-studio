@@ -146,7 +146,7 @@ fn choices(key: &str, title: &str, note: Option<&str>, items: Vec<(String, bool,
     }
     let mut out = col().w_full().gap(6.0).child(section(title, k)).child(group);
     if let Some(note) = note {
-        out = out.child(text(note.to_owned()).font(k.ty.small).color(c.text_faint).wrap());
+        out = out.child(text(note.to_owned()).key(format!("{key}-note")).font(k.ty.small).color(c.text_faint).wrap());
     }
     out
 }
@@ -171,9 +171,12 @@ fn custom_effort(s: &State, canvas: Canvas, k: &Kit) -> El {
             k,
         ));
         if custom.sol {
+            // A start Use prompt loaded from another client's picture stays in view and pickable.
+            let elsewhere = (!SOL_FROM.contains(&custom.sol_from)).then_some(custom.sol_from);
             let from = SOL_FROM
-                .iter()
-                .map(|&n| -> (String, bool, Pick) { (format!("Step {n}"), custom.sol_from == n, Box::new(move |s: &mut State| s.custom_effort.sol_from = n)) });
+                .into_iter()
+                .chain(elsewhere)
+                .map(|n| -> (String, bool, Pick) { (format!("Step {n}"), custom.sol_from == n, Box::new(move |s: &mut State| s.custom_effort.sol_from = n)) });
             panel = panel.child(choices("custom-sol-from", "Sol-Attn from", Some("Starting later keeps lettering, and saves less."), from.collect(), k));
             let error = s.tau().err();
             let tau = TextInput::new(&s.sparse_tau)

@@ -144,6 +144,19 @@ impl Default for Custom {
     }
 }
 
+impl Custom {
+    /// What Custom is set to for `tuning` to be sent again.
+    pub fn from_tuning(t: &Tuning) -> Custom {
+        Custom {
+            sol: t.attention == Some(Attention::Sol),
+            sol_from: t.sparse_start.map_or(SOL_FROM[0], start_step),
+            tau: t.sparse_tau,
+            draft_steps: t.draft_steps.unwrap_or(0),
+            int8: t.attention_precision == Some(Precision::Int8Fp16),
+        }
+    }
+}
+
 impl Effort {
     /// What this level sends for a picture on `canvas`.
     pub fn tuning(self, canvas: Canvas, custom: &Custom) -> Tuning {
@@ -259,6 +272,22 @@ mod tests {
         );
         let small = Effort::Custom.tuning(canvas(2304, 1728), &custom);
         assert_eq!(small, Tuning { attention_precision: Some(Precision::Int8Fp16), ..Tuning::default() });
+    }
+
+    #[test]
+    fn custom_set_from_what_was_sent_sends_it_again() {
+        let sent = Tuning {
+            attention: Some(Attention::Sol),
+            sparse_tau: Some(1.5),
+            sparse_start: Some(start_fraction(5)),
+            draft_steps: Some(3),
+            attention_precision: Some(Precision::Int8Fp16),
+        };
+        let off_list = |step| Tuning { attention: Some(Attention::Sol), sparse_start: Some(start_fraction(step)), ..Tuning::default() };
+        assert_eq!(Custom::from_tuning(&off_list(1)).sol_from, 1, "a start Custom doesn't offer is kept, not moved");
+        for t in [sent, Tuning::default(), Tuning { draft_steps: Some(2), ..Tuning::default() }, off_list(1), off_list(6)] {
+            assert_eq!(Effort::Custom.tuning(canvas(4096, 4096), &Custom::from_tuning(&t)), t);
+        }
     }
 
     #[test]

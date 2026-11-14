@@ -121,6 +121,7 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
     let rerunnable = g.rerun_request().is_some();
     let stoppable = s.can_stop(g);
     let edit = id.to_owned();
+    let reuse = id.to_owned();
     let stop = id.to_owned();
     let (a, c, d, e, f) = (id.to_owned(), g.prompt().to_owned(), g.seed().map(|s| s.to_string()).unwrap_or_default(), id.to_owned(), id.to_owned());
     let menu =
@@ -141,6 +142,10 @@ fn menu(s: &State, k: &Kit, trigger: El, layer: &mut Vec<El>) -> El {
         s.edit_picture(&edit);
     }))
     .separator()
+    .item(item("Use prompt").icon(&icons::USE_PROMPT).disabled(!known).on_select(move |s: &mut State| {
+        s.menu = None;
+        s.use_prompt(&reuse);
+    }))
     .item(item("Copy prompt").icon(&icons::COPY).disabled(!known).on_select_tx(move |s: &mut State, tx| {
         s.menu = None;
         tx.copy(c.clone());
