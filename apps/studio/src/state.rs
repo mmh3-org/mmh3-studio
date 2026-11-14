@@ -18,6 +18,10 @@ use crate::net::{Feed, Net};
 /// Thumbnails kept decoded, newest first; older rows show a placeholder.
 pub const MAX_THUMBS: usize = 240;
 pub const NOTE_SECONDS: f64 = 4.0;
+/// The most pictures one Generate asks for.
+pub const MAX_COUNT: u32 = 8;
+/// Seeds are below this: random ones, and a batch's counting up from one typed in.
+pub const SEEDS: u64 = 1 << 32;
 
 pub enum Conn {
     Connecting,
@@ -388,6 +392,8 @@ pub struct State {
     pub custom_effort: Custom,
     pub sparse_tau: TextEdit,
     pub seed: TextEdit,
+    /// How many pictures Generate asks for, from 1 to [`MAX_COUNT`].
+    pub count: u32,
     pub references: Vec<Reference>,
     /// Files are being dragged over the composer.
     pub dropping: bool,
@@ -432,7 +438,13 @@ pub struct State {
 pub fn random_seed() -> u64 {
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u128(entropy());
-    h.finish() % 4_294_967_296
+    h.finish() % SEEDS
+}
+
+/// The seed of picture `i` of a batch asked for at `seed`: the ones after it, so the seed in the
+/// composer gives the whole batch again.
+pub fn batch_seed(seed: u64, i: u32) -> u64 {
+    if seed < SEEDS { (seed + u64::from(i)) % SEEDS } else { seed.wrapping_add(u64::from(i)) }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -465,6 +477,7 @@ impl State {
             custom_effort: Custom::default(),
             sparse_tau: TextEdit::new(""),
             seed: TextEdit::new(random_seed().to_string()),
+            count: 1,
             references: Vec::new(),
             dropping: false,
             width: 0.0,
@@ -631,9 +644,33 @@ impl State {
         })
     }
 
+    /// What Generate sends, a request for each picture of the batch: an empty seed gives each a
+    /// seed of its own, and one typed in counts up from there.
+    pub fn requests(&self) -> Result<Vec<ImageRequest>, String> {
+        let first = self.request()?;
+        let typed = !self.seed.text.trim().is_empty();
+        let seed = |i| match (typed, i) {
+            (true, _) => batch_seed(first.seed, i),
+            (false, 0) => first.seed,
+            (false, _) => random_seed(),
+        };
+        Ok((0..self.count.clamp(1, MAX_COUNT)).map(|i| ImageRequest { seed: seed(i), ..first.clone() }).collect())
+    }
+
+    pub fn set_count(&mut self, n: u32) {
+        self.count = n.clamp(1, MAX_COUNT);
+    }
+
+    /// Sends the batch in order, so the server runs the first seed first, and shows its first
+    /// picture.
     pub fn generate(&mut self) {
-        match self.request() {
-            Ok(r) => self.submit(r),
+        match self.requests() {
+            Ok(batch) => {
+                let ids: Vec<String> = batch.into_iter().map(|r| self.submit(r)).collect();
+                if let Some(first) = ids.first() {
+                    self.select(first);
+                }
+            }
             Err(why) => self.note(why, None, true),
         }
     }
@@ -646,15 +683,17 @@ impl State {
         self.submit(ImageRequest { seed: random_seed(), ..r });
     }
 
-    pub fn submit(&mut self, r: ImageRequest) {
+    /// Adds a placeholder for `r`, selected, and says its id.
+    pub fn submit(&mut self, r: ImageRequest) -> String {
         self.next_local += 1;
         let id = format!("local-{}", self.next_local);
         self.gens.insert(0, Gen::new(id.clone(), Some(r.clone()), Phase::Sending));
         self.select(&id);
         self.pane = Pane::Picture;
         if let Some(net) = &self.net {
-            net.submit(id, r);
+            net.submit(id.clone(), r);
         }
+        id
     }
 
     /// The server's answer to a submission: the local placeholder takes the server's id, or

@@ -6,7 +6,7 @@ use rune::{El, Key, KeyEvent, SurfaceFit, Tx, col, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner, TextArea, TextInput};
 
 use crate::icons;
-use crate::state::{REFERENCE_EXTENSIONS, Reference, SizeChoice, State, Thumb, missing_pictures, picture_tag};
+use crate::state::{MAX_COUNT, REFERENCE_EXTENSIONS, Reference, SizeChoice, State, Thumb, batch_seed, missing_pictures, picture_tag};
 
 pub const GENERATE_LABEL: &str = "⌘↩";
 
@@ -276,6 +276,28 @@ fn seed(s: &State, k: &Kit) -> El {
     out
 }
 
+/// How many images Generate asks for, with the seeds they get and how long they all take.
+fn count(s: &State, k: &Kit) -> El {
+    let n = s.count;
+    let items = (1..=MAX_COUNT).map(|i| -> (String, bool, Pick) { (i.to_string(), n == i, Box::new(move |s: &mut State| s.set_count(i))) });
+    let note = (n > 1).then(|| {
+        let seed = s.seed.text.trim();
+        let seeds = match seed.parse::<u64>() {
+            Ok(seed) => format!(", seeds {seed} to {}", batch_seed(seed, n - 1)),
+            Err(_) if seed.is_empty() => ", each with a random seed".to_owned(),
+            Err(_) => String::new(),
+        };
+        let time = s.chosen_size().ok().map_or_else(String::new, |size| {
+            let (model, run) = (s.time_model(), s.run_for(size));
+            let all = model.seconds(run, s.cold()) + f64::from(n - 1) * model.seconds(run, false);
+            let slower = if s.gpu_held_back() { ", may be slower" } else { "" };
+            format!(", ≈ {} in all{slower}", approx(all))
+        });
+        format!("{n} images{seeds}{time}.")
+    });
+    choices("count", "Images", note.as_deref(), items.collect(), k)
+}
+
 fn reference_tile(i: usize, r: &Reference, k: &Kit) -> El {
     let c = &k.c;
     let n = i + 1;
@@ -402,11 +424,12 @@ pub fn composer(s: &State, k: &Kit) -> El {
         .build(k)
         .key("prompt");
     let ready = s.request();
-    let help = match &ready {
-        Ok(_) => "Generate an image".to_owned(),
-        Err(why) => why.clone(),
+    let help = match (&ready, s.count) {
+        (Ok(_), 1) => "Generate an image".to_owned(),
+        (Ok(_), n) => format!("Generate {n} images"),
+        (Err(why), _) => why.clone(),
     };
-    let generate = Button::new("Generate")
+    let generate = Button::new(if s.count == 1 { "Generate".to_owned() } else { format!("Generate {}", s.count) })
         .variant(ButtonVariant::Submit)
         .control_size(ControlSize::Large)
         .icon(&icons::SPARKLE)
@@ -439,5 +462,6 @@ pub fn composer(s: &State, k: &Kit) -> El {
         .child(references(s, k))
         .child(sizes(s, k))
         .child(seed(s, k))
+        .child(count(s, k))
         .child(col().w_full().gap(8.0).child(generate).child(text(queue).key("queue-note").font(k.ty.small).color(k.c.text_faint).wrap()))
 }

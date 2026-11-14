@@ -605,3 +605,50 @@ fn use_prompt_loads_the_selected_picture_s_prompt_and_seed_into_the_composer() {
     assert_eq!(rt.state.chosen_size(), Ok(size));
     assert!(rt.find("prompt").is_some());
 }
+
+#[test]
+fn cmd_return_with_a_count_of_four_generates_four_pictures_with_seeds_one_after_another() {
+    let mut rt = runtime(scenes::empty, false);
+    rt.update(|s, _| {
+        s.prompt.replace_text("a fox");
+        s.seed.replace_text("41");
+    });
+    rt.frame(1.0 / 60.0);
+    tap(&mut rt, "count-3");
+    assert_eq!(rt.state.count, 4);
+    tap(&mut rt, "prompt");
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods { cmd: true, ..Mods::default() } });
+    rt.frame(1.0 / 60.0);
+    let seeds: Vec<u64> = rt.state.gens.iter().filter_map(state::Gen::seed).collect();
+    assert_eq!(seeds, [44, 43, 42, 41], "sent in order, newest first");
+    assert_eq!(rt.state.selected_gen().and_then(state::Gen::seed), Some(41));
+}
+
+#[test]
+fn the_generate_button_and_count_note_say_how_many_and_which_seeds() {
+    let mut rt = runtime(scenes::empty, false);
+    rt.update(|s, _| {
+        s.prompt.replace_text("a fox");
+        s.seed.replace_text("4294967295");
+    });
+    rt.frame(1.0 / 60.0);
+    let button = |rt: &Runtime<State>| {
+        let e = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("generate")).unwrap();
+        (e.label.unwrap_or_default(), e.help.unwrap_or_default())
+    };
+    let (label, help) = button(&rt);
+    assert_eq!(label, "Generate");
+    assert!(help.contains("Generate an image"), "{help}");
+    assert!(rt.find("count-note").is_none(), "one picture needs no note");
+
+    tap(&mut rt, "count-3");
+    let (label, help) = button(&rt);
+    assert_eq!(label, "Generate 4");
+    assert!(help.contains("Generate 4 images"), "{help}");
+    let note = text_of(&rt, "count-note");
+    assert!(note.starts_with("4 images, seeds 4294967295 to 2, ≈ ") && note.ends_with(" in all."), "{note}");
+
+    rt.update(|s, _| s.seed.replace_text(""));
+    rt.frame(1.0 / 60.0);
+    assert!(text_of(&rt, "count-note").starts_with("4 images, each with a random seed, ≈ "), "{}", text_of(&rt, "count-note"));
+}

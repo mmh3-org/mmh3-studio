@@ -454,6 +454,39 @@ fn the_tags_a_prompt_mentions_without_a_picture_are_found_once_each() {
 }
 
 #[test]
+fn a_batch_counts_its_seeds_up_from_the_composer_s_and_shows_its_first_picture() {
+    let mut s = online();
+    s.prompt.replace_text("a fox");
+    s.seed.replace_text("4294967294");
+    s.set_count(4);
+    let seeds: Vec<u64> = s.requests().unwrap().iter().map(|r| r.seed).collect();
+    assert_eq!(seeds, [4_294_967_294, 4_294_967_295, 0, 1], "seeds wrap within the range of a random one");
+    s.generate();
+    assert_eq!(s.gens.len(), 4);
+    assert_eq!(s.selected_gen().and_then(Gen::seed), Some(4_294_967_294), "the first of the batch is shown");
+    assert_eq!(s.gens.iter().map(Gen::prompt).collect::<Vec<_>>(), ["a fox"; 4]);
+    s.seed.replace_text("");
+    let seeds: Vec<u64> = s.requests().unwrap().iter().map(|r| r.seed).collect();
+    assert_eq!(seeds.len(), 4);
+    assert!(seeds.iter().all(|&seed| seed < SEEDS), "{seeds:?}");
+    assert!(seeds.iter().enumerate().all(|(i, a)| seeds[i + 1..].iter().all(|b| a != b)), "an empty seed gives each picture its own: {seeds:?}");
+    assert!(seeds.windows(2).any(|w| w[1] != w[0].wrapping_add(1) % SEEDS), "random ones don't count up: {seeds:?}");
+    assert_eq!(batch_seed(SEEDS + 5, 2), SEEDS + 7, "a seed typed past the range only counts up");
+}
+
+#[test]
+fn the_count_stays_between_one_and_eight() {
+    let mut s = online();
+    s.prompt.replace_text("a fox");
+    assert_eq!(s.requests().unwrap().len(), 1, "one by default");
+    s.set_count(0);
+    assert_eq!(s.count, 1);
+    s.set_count(20);
+    assert_eq!(s.count, MAX_COUNT);
+    assert_eq!(s.requests().unwrap().len(), 8);
+}
+
+#[test]
 fn use_prompt_restores_the_prompt_size_effort_and_seed() {
     let mut s = online();
     let tuning = Tuning { attention: Some(Attention::Sol), sparse_start: Some(0.5), sparse_tau: Some(1.5), draft_steps: Some(2), ..Tuning::default() };
