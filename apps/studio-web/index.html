@@ -8,6 +8,12 @@
 <div id="status">Loading mmh3 studio…</div>
 <script type="module">
 import init from './app.js';
+// iOS 27 sends a tap's compatibility mousedown even after Rune prevented the pointerdown; its
+// default action focuses the canvas and closes the soft keyboard a text field just opened.
+// Drop once Rune fixes https://github.com/anomalyco/rune/issues/165.
+document.addEventListener('mousedown', event => {
+    if (event.target instanceof HTMLCanvasElement) event.preventDefault();
+}, { capture: true });
 try {
     if (!navigator.gpu) throw new Error('mmh3 studio needs WebGPU: a current Chrome, Edge, Safari or Firefox, over HTTPS or on localhost.');
     await init();
